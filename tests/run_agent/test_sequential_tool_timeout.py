@@ -273,3 +273,55 @@ def test_sequential_timeout_does_not_cut_clarify_human_wait(
     assert "timed out" not in messages[0]["content"]
     assert messages[1]["content"] == "second result"
     assert not any(event.get("error_type") == "tool_timeout" for event in terminal_events)
+
+
+def _terminal_call(call_id: str, timeout: int = 1):
+    return SimpleNamespace(
+        id=call_id,
+        type="function",
+        function=SimpleNamespace(
+            name="terminal",
+            arguments=json.dumps({"command": "sleep 30", "timeout": timeout}),
+        ),
+    )
+
+
+def test_sequential_terminal_timeout_beats_generic_cap(tmp_path, monkeypatch):
+    """A lone Desktop ``terminal`` call must honor the model's timeout.
+
+    Sequential default is the 420s concurrent cap. A wedged ``wmic`` with
+    ``timeout=1`` used to freeze the chat until that cap (or forever, before
+    Phase 2a). The chat must unstick at timeout + grace, not 420s.
+    """
+    agent = _make_agent(tmp_path)
+    monkeypatch.delenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", raising=False)
+    monkeypatch.setattr("agent.deadline._timeouts_section", lambda: {})
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def _dispatch(_name, _args, _task_id, *, tool_call_id, **_kwargs):
+        if tool_call_id == "hung":
+            first_started.set()
+            release_first.wait()
+            return "late result"
+        return "second result"
+
+    messages: list[dict] = []
+    started = time.monotonic()
+    try:
+        with patch("run_agent.handle_function_call", side_effect=_dispatch):
+            execute_tool_calls_sequential(
+                agent,
+                SimpleNamespace(tool_calls=[_terminal_call("hung", timeout=1), _tool_call("next")]),
+                messages,
+                "task",
+            )
+    finally:
+        release_first.set()
+
+    elapsed = time.monotonic() - started
+    assert first_started.is_set()
+    assert elapsed < 12.0, f"terminal timeout=1 hung the turn for {elapsed:.1f}s"
+    assert "timed out after" in messages[0]["content"]
+    assert messages[1]["content"] == "second result"

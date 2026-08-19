@@ -751,13 +751,30 @@ def _run_agent_tool_execution_middleware(
 _SEQUENTIAL_INTERRUPT_POLL_SECONDS = 1.0
 
 
-def _resolve_sequential_tool_timeout() -> float | None:
+# Extra seconds after a tool's own timeout so an inner kill (taskkill /T,
+# process-group SIGKILL) can finish and return a real 124 before we
+# abandon the worker. Matches ``terminal``'s default when the model omits
+# ``timeout``.
+_SEQUENTIAL_TIMEOUT_GRACE_S = 5.0
+_DEFAULT_TERMINAL_TIMEOUT_S = 180.0
+
+
+def _resolve_sequential_tool_timeout(
+    function_name: str | None = None,
+    function_args: dict[str, Any] | None = None,
+) -> float | None:
     """Deadline for one sequential tool call (#85125 Phase 2a).
 
     ``timeouts.tools.sequential_call`` in config.yaml wins; when unset, the
     sequential path inherits the concurrent batch deadline (same value, same
     ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` legacy bridge) so the two executor
     paths cannot drift apart by default. ``0``/negative disables the bound.
+
+    ``terminal`` also honors the model's ``timeout`` argument (default 180s)
+    plus a short kill-grace. A wedged ``wmic`` / pipe-drain with
+    ``timeout=15`` must unstick the Desktop chat at ~20s, not sit on the
+    420s generic cap. The tighter of the two bounds wins. A disabled
+    sequential cap still applies the tool's own timeout.
 
     NOTE: this path deliberately does NOT use ``agent.deadline.run_bounded_sync``.
     The sequential/concurrent executors extend their deadline dynamically while
@@ -768,10 +785,26 @@ def _resolve_sequential_tool_timeout() -> float | None:
     """
     from agent.deadline import resolve_timeout
 
-    return resolve_timeout(
+    configured = resolve_timeout(
         "tools.sequential_call",
         default=_resolve_concurrent_tool_timeout(),
     )
+    if function_name != "terminal":
+        return configured
+
+    raw = (function_args or {}).get("timeout")
+    if raw is None:
+        raw = os.getenv("TERMINAL_TIMEOUT", str(int(_DEFAULT_TERMINAL_TIMEOUT_S)))
+    try:
+        tool_timeout = float(raw)
+    except (TypeError, ValueError):
+        tool_timeout = _DEFAULT_TERMINAL_TIMEOUT_S
+    if tool_timeout <= 0:
+        tool_timeout = _DEFAULT_TERMINAL_TIMEOUT_S
+    tool_deadline = tool_timeout + _SEQUENTIAL_TIMEOUT_GRACE_S
+    if configured is None:
+        return tool_deadline
+    return min(configured, tool_deadline)
 
 
 def _run_sequential_tool_execution_middleware(
@@ -793,7 +826,7 @@ def _run_sequential_tool_execution_middleware(
     ``<= 0``) owns that wait. Applying the generic tool deadline here would
     return ``tool_timeout`` while the prompt and worker stay active.
     """
-    timeout_s = _resolve_sequential_tool_timeout()
+    timeout_s = _resolve_sequential_tool_timeout(function_name, function_args)
     kwargs = {
         "function_name": function_name,
         "function_args": function_args,

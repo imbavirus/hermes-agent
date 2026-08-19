@@ -519,3 +519,32 @@ class TestSequentialToolTimeoutResolver:
             lambda: {"tools": {"concurrent_batch": 0}},
         )
         assert self._resolver()() is None
+
+    def test_terminal_timeout_beats_generic_cap(self, monkeypatch):
+        monkeypatch.setattr("agent.deadline._timeouts_section", lambda: {})
+        monkeypatch.delenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", raising=False)
+        monkeypatch.delenv("TERMINAL_TIMEOUT", raising=False)
+        from agent.tool_executor import _SEQUENTIAL_TIMEOUT_GRACE_S
+
+        assert self._resolver()("terminal", {"timeout": 15}) == 15 + _SEQUENTIAL_TIMEOUT_GRACE_S
+
+    def test_terminal_timeout_still_applies_when_sequential_cap_disabled(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.deadline._timeouts_section",
+            lambda: {"tools": {"sequential_call": 0}},
+        )
+        from agent.tool_executor import _SEQUENTIAL_TIMEOUT_GRACE_S
+
+        assert self._resolver()("terminal", {"timeout": 15}) == 15 + _SEQUENTIAL_TIMEOUT_GRACE_S
+
+    def test_configured_sequential_cap_can_tighten_terminal(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.deadline._timeouts_section",
+            lambda: {"tools": {"sequential_call": 10}},
+        )
+        assert self._resolver()("terminal", {"timeout": 15}) == 10.0
+
+    def test_non_terminal_ignores_timeout_arg(self, monkeypatch):
+        monkeypatch.setattr("agent.deadline._timeouts_section", lambda: {})
+        monkeypatch.delenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", raising=False)
+        assert self._resolver()("web_search", {"timeout": 1}) == 420.0
