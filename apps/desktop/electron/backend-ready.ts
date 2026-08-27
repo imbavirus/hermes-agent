@@ -51,7 +51,24 @@ function resolvePortAnnounceTimeoutMs(env = process.env) {
  * on every terminal path — resolve, reject, or timeout — so repeated
  * backend spawns don't leak listener slots on the child.
  */
-function waitForDashboardPort(child, timeoutMs = resolvePortAnnounceTimeoutMs(), describeOutputTail = () => '') {
+function extractReadyPort(text: string): number | null {
+  const m = String(text).match(_READY_RE)
+
+  if (!m) {
+    return null
+  }
+
+  const port = parseInt(m[1], 10)
+
+  return Number.isInteger(port) && port > 0 ? port : null
+}
+
+function waitForDashboardPort(
+  child,
+  timeoutMs = resolvePortAnnounceTimeoutMs(),
+  describeOutputTail = () => '',
+  initialText = ''
+) {
   return new Promise((resolve, reject) => {
     let buf = ''
     let done = false
@@ -75,11 +92,11 @@ function waitForDashboardPort(child, timeoutMs = resolvePortAnnounceTimeoutMs(),
       while ((nl = buf.indexOf('\n')) !== -1) {
         const line = buf.slice(0, nl)
         buf = buf.slice(nl + 1)
-        const m = line.match(_READY_RE)
+        const port = extractReadyPort(line)
 
-        if (m) {
+        if (port != null) {
           cleanup()
-          resolve(parseInt(m[1], 10))
+          resolve(port)
 
           return
         }
@@ -98,12 +115,25 @@ function waitForDashboardPort(child, timeoutMs = resolvePortAnnounceTimeoutMs(),
 
     const timer = setTimeout(() => {
       cleanup()
-      reject(new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
+      reject(
+        new Error(
+          `Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${describeOutputTail()}`
+        )
+      )
     }, timeoutMs)
 
     child.stdout.on('data', onData)
     child.on('exit', onExit)
     child.on('error', onError)
+
+    // Replay bytes already drained by an earlier stdout consumer (the spawn
+    // output-tail). claimBackendChild's Windows start-marker probe can take
+    // longer than a warm `hermes serve` needs to print READY; without this
+    // replay the waiter attaches after the line is gone and times out against
+    // a healthy backend.
+    if (initialText) {
+      onData(initialText)
+    }
   })
 }
 
@@ -169,7 +199,11 @@ function waitForDashboardReadyFile(
 
     const timer = setTimeout(() => {
       cleanup()
-      reject(new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
+      reject(
+        new Error(
+          `Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${describeOutputTail()}`
+        )
+      )
     }, timeoutMs)
 
     child.on('exit', onExit)
@@ -189,18 +223,45 @@ function waitForDashboardPortAnnouncement(
   options: {
     /** Returns a formatted stdout/stderr tail suffix for exit errors (#93608). */
     describeOutputTail?: () => string
+    /** Bytes already read from the child before this waiter attached. */
+    initialText?: string
     readyFile?: fs.PathOrFileDescriptor | null
     timeoutMs?: number
   } = {}
 ) {
   const timeoutMs = options.timeoutMs ?? resolvePortAnnounceTimeoutMs()
   const describeOutputTail = options.describeOutputTail ?? (() => '')
+  const stdoutWait = waitForDashboardPort(child, timeoutMs, describeOutputTail, options.initialText)
 
-  if (options.readyFile) {
-    return waitForDashboardReadyFile(options.readyFile, child, timeoutMs, describeOutputTail)
+  if (!options.readyFile) {
+    return stdoutWait
   }
 
-  return waitForDashboardPort(child, timeoutMs, describeOutputTail)
+  const fileWait = waitForDashboardReadyFile(options.readyFile, child, timeoutMs, describeOutputTail)
+
+  // Either channel is enough. The ready file survives a late waiter; stdout
+  // wins if the file write is skipped (older serve, missing env).
+  return new Promise((resolve, reject) => {
+    let settled = false
+
+    const finish = (fn: (value: any) => void, value: any) => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      fn(value)
+    }
+
+    stdoutWait.then(
+      port => finish(resolve, port),
+      err => finish(reject, err)
+    )
+    fileWait.then(
+      port => finish(resolve, port),
+      err => finish(reject, err)
+    )
+  })
 }
 
 export {

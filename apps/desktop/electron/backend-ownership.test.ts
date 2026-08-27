@@ -118,6 +118,33 @@ test('failed persistence awaits asynchronous cleanup of the exact identity', asy
   assert.equal(rejected, true)
 })
 
+test('startup reap drops a dead PID without start-marker probes', async () => {
+  const dead = ownershipEntry({ pid: 404, nonce: 'dead' })
+  const live = ownershipEntry({ pid: 405, nonce: 'live' })
+  const store = memoryStore(stored([dead, live]))
+  const matchesParent = vi.fn(async () => undefined)
+  const matchesIdentity = vi.fn(async () => true)
+  const stop = vi.fn()
+  const ownership = createOwnership(store, {
+    matchesIdentity,
+    matchesParent,
+    pidExists: pid => pid === 405,
+    stop
+  })
+
+  assert.deepEqual(await ownership.reapOrphans(), [405])
+  assert.deepEqual(
+    matchesParent.mock.calls.map(call => call[0].pid),
+    [405]
+  )
+  assert.deepEqual(
+    matchesIdentity.mock.calls.map(call => call[0].pid),
+    [405]
+  )
+  assert.deepEqual(stop.mock.calls, [[live]])
+  assert.deepEqual(parseBackendOwnership(store.value()), [])
+})
+
 test('startup reap drops a confirmed PID reuse mismatch without stopping it', async () => {
   const entry = ownershipEntry()
   const store = memoryStore(stored([entry]))

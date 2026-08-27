@@ -136,6 +136,7 @@ test('buildDesktopBackendEnv forces PYTHONUTF8 unless the user set it explicitly
   })
 
   assert.equal(defaulted.PYTHONUTF8, '1')
+  assert.equal(defaulted.PYTHONUNBUFFERED, '1')
 
   const optedOut = buildDesktopBackendEnv({
     hermesHome: '/Users/test/.hermes',

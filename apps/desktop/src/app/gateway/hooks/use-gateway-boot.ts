@@ -974,7 +974,7 @@ export function useGatewayBoot({
         // Everything else keeps dialing the primary.
         // Bounded like the reconnect path (#93454): a wedged main-process
         // round-trip must not hang "Starting Hermes…" forever. Initial boot
-        // rides out a full backend cold spawn, so it gets the shared 45s
+        // rides out a full backend cold spawn, so it gets the shared
         // backend-boot budget, not the 20s reconnect budget.
         const conn = await withTimeout(
           desktop.getConnection(windowProfileOverride() ?? undefined),

@@ -26,6 +26,8 @@ export interface BackendOwnershipDeps {
   matchesIdentity: (identity: BackendIdentity) => Promise<boolean | undefined>
   /** True when the recorded parent is still running; undefined when unknown. */
   matchesParent: (entry: BackendOwnershipEntry) => Promise<boolean | undefined>
+  /** Cheap PID liveness. Dead backends are dropped without start-marker probes. */
+  pidExists?: (pid: number) => boolean
   stop: (identity: BackendIdentity) => Promise<void> | void
   store: BackendOwnershipStore
 }
@@ -224,6 +226,15 @@ export function createBackendOwnership(deps: BackendOwnershipDeps) {
       const reaped: number[] = []
 
       for (const entry of entries) {
+        // Drop corpses before any start-marker probe. Each probe shells out to
+        // PowerShell on Windows (~2-30s). A stale roster of dead PIDs made
+        // startHermes take minutes, so the renderer’s 45s getConnection()
+        // budget expired and left a boot-failure overlay on a healthy serve.
+        // Renderer budget is now 180s; still skip corpses so boot stays fast.
+        if (deps.pidExists && !deps.pidExists(entry.pid)) {
+          continue
+        }
+
         // A backend whose Electron parent is still running is NOT an orphan:
         // reaping it would kill a live instance's session. This is what stops
         // a second launch from SIGTERMing the running instance's backend even

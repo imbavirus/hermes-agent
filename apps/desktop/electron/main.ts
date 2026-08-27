@@ -3382,9 +3382,19 @@ async function stopOwnedBackend(identity) {
   }
 }
 
+function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
 const backendOwnership = createBackendOwnership({
   matchesIdentity: backendIdentityMatches,
   matchesParent: backendParentMatches,
+  pidExists,
   stop: stopOwnedBackend,
   store: {
     read: () => {
@@ -12016,7 +12026,7 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   backend.args = getBackendArgsForRuntime(backend)
   const hermesCwd = resolveHermesCwd()
   const webDist = resolveWebDist()
-  const readyFile = backend.readyFile ? makeDashboardReadyFile() : null
+  const readyFile = makeDashboardReadyFile()
 
   // Guard BEFORE the "Starting" line: a profile that only exists on a remote
   // backend (remote-primary desktop asked for a forced-local child) rejects
@@ -12070,6 +12080,14 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   // the claim, and would miss anything printed before it.
   const outputTail = createBackendOutputTail()
   outputTail.attach(child)
+  // Watch stdout + ready file from spawn, not after claim. The Windows
+  // start-marker probe can outlast a warm serve's READY line; a late waiter
+  // would time out against a healthy backend.
+  const portPromise = waitForDashboardPortAnnouncement(child, {
+    describeOutputTail: () => outputTail.describe(),
+    initialText: outputTail.text(),
+    readyFile
+  })
   await claimBackendChild(child, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce, outputTail)
 
   child.stdout.on('data', rememberLog)
@@ -12103,10 +12121,7 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   })
 
   // Discover the ephemeral port the child bound to
-  const port = await Promise.race([
-    waitForDashboardPortAnnouncement(child, { describeOutputTail: () => outputTail.describe(), readyFile }),
-    startFailed
-  ])
+  const port = await Promise.race([portPromise, startFailed])
 
   if (readyFile) {
     fs.unlink(readyFile, () => {})
@@ -12407,7 +12422,7 @@ async function startHermes() {
     backend.args = getBackendArgsForRuntime(backend)
     const hermesCwd = resolveHermesCwd()
     const webDist = resolveWebDist()
-    const readyFile = backend.readyFile ? makeDashboardReadyFile() : null
+    const readyFile = makeDashboardReadyFile()
 
     await advanceBootProgress('backend.spawn', `Starting Hermes backend via ${backend.label}`, 84)
     rememberLog(`Starting Hermes backend via ${backend.label}`)
@@ -12457,6 +12472,14 @@ async function startHermes() {
     // later, after the claim, and would miss anything printed before it.
     const primaryOutputTail = createBackendOutputTail()
     primaryOutputTail.attach(hermesProcess)
+    // Watch stdout + ready file from spawn, not after claim. The Windows
+    // start-marker probe can outlast a warm serve's READY line; a late waiter
+    // would time out against a healthy backend.
+    const portPromise = waitForDashboardPortAnnouncement(hermesProcess, {
+      describeOutputTail: () => primaryOutputTail.describe(),
+      initialText: primaryOutputTail.text(),
+      readyFile
+    })
     await claimBackendChild(
       hermesProcess,
       `${backend.command} ${backend.args.join(' ')}`,
@@ -12543,13 +12566,7 @@ async function startHermes() {
     await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
 
     // Discover the ephemeral port the child bound to
-    const port = await Promise.race([
-      waitForDashboardPortAnnouncement(hermesProcess, {
-        describeOutputTail: () => primaryOutputTail.describe(),
-        readyFile
-      }),
-      backendStartFailed
-    ])
+    const port = await Promise.race([portPromise, backendStartFailed])
 
     if (readyFile) {
       fs.unlink(readyFile, () => {})

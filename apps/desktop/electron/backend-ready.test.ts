@@ -121,6 +121,17 @@ test('rejects on a child error event', async () => {
   await assert.rejects(p, /spawn ENOENT/)
 })
 
+test('resolves from READY bytes already drained before the waiter attached', async () => {
+  const child = makeFakeChild()
+  const p = waitForDashboardPort(
+    child,
+    1000,
+    () => '',
+    'noise\nHERMES_BACKEND_READY port=16939\n'
+  )
+  assert.equal(await p, 16939)
+})
+
 test('rejects with the timeout message after the deadline', async () => {
   const child = makeFakeChild()
   await assert.rejects(
@@ -173,6 +184,40 @@ test('readDashboardReadyFile ignores missing, malformed, or invalid files', () =
     assert.equal(readDashboardReadyFile(tmp.file), null)
     fs.writeFileSync(tmp.file, JSON.stringify({ port: 0 }))
     assert.equal(readDashboardReadyFile(tmp.file), null)
+  } finally {
+    tmp.cleanup()
+  }
+})
+
+test('waitForDashboardReadyFile resolves if the file already exists', async () => {
+  const tmp = mkTmpReadyFile()
+  const child = makeFakeChild()
+
+  try {
+    fs.writeFileSync(tmp.file, JSON.stringify({ port: 3344 }))
+    assert.equal(await waitForDashboardReadyFile(tmp.file, child, 1000), 3344)
+  } finally {
+    tmp.cleanup()
+  }
+})
+
+test('waitForDashboardPortAnnouncement accepts a READY line already in initialText', async () => {
+  const child = makeFakeChild()
+  const p = waitForDashboardPortAnnouncement(child, {
+    initialText: 'HERMES_BACKEND_READY port=22100\n',
+    timeoutMs: 1000
+  })
+  assert.equal(await p, 22100)
+})
+
+test('waitForDashboardPortAnnouncement still accepts stdout when a ready file is also set', async () => {
+  const tmp = mkTmpReadyFile()
+  const child = makeFakeChild()
+
+  try {
+    const p = waitForDashboardPortAnnouncement(child, { readyFile: tmp.file, timeoutMs: 1000 })
+    child.stdout.emit('data', 'HERMES_BACKEND_READY port=4455\n')
+    assert.equal(await p, 4455)
   } finally {
     tmp.cleanup()
   }

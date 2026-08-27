@@ -139,6 +139,7 @@ function buildDesktopBackendEnv({
     // pre-bootstrap tracebacks) still decodes with the locale default without
     // this. User's explicit setting wins. Re-port of PR #56499 (echoriver89).
     PYTHONUTF8: currentEnv?.PYTHONUTF8 ?? '1',
+    PYTHONUNBUFFERED: currentEnv?.PYTHONUNBUFFERED ?? '1',
     [key]: buildDesktopBackendPath({
       hermesHome,
       venvRoot,
