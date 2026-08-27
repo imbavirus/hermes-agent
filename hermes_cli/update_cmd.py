@@ -7161,30 +7161,32 @@ def _rebuild_desktop_after_update(
         and _m()._resolve_node_runtime_npm()
         and has_desktop_app
     ):
+        print(
+            "  ⚠ Desktop asar not rebuilt "
+            f"(no packaged app under {desktop_dir / 'release'}). "
+            "Bot Mode is baked into app.asar — fully quit Hermes.exe, then:\n"
+            "      hermes desktop --force-build\n"
+            "    Launch that tree's Hermes.exe, not an older Start Menu copy."
+        )
         return True
 
     print("→ Checking if desktop app needs rebuilding...")
-    # Consult the content-hash stamp IN-PROCESS first. The spawned
-    # `hermes desktop --build-only` subprocess re-imports the whole CLI stack
-    # (~1-3 s) just to reach the same _m()._desktop_build_needed check; when
-    # the stamp already says "up to date" we can skip the spawn entirely. The
-    # update path never passes --source, so the subprocess would run with
-    # source_mode=False — mirror that here. Any error in the pre-check falls
-    # through to the subprocess.
-    skip_desktop_build = False
-    try:
-        skip_desktop_build = not _m()._desktop_build_needed(
-            desktop_dir, _m().PROJECT_ROOT, source_mode=False
-        )
-    except Exception:
-        skip_desktop_build = False
-    if skip_desktop_build:
-        print("  ✓ Desktop app up to date")
-        return True
-
+    # Always `--force-build`. Stamp-skip left other machines on Infernos
+    # git SHAs with yesterday's app.asar (bots plugin is baked in at pack
+    # time; `git reset` / `hermes update` does not touch a running or
+    # Start-Menu Hermes.exe). `--build-only` without `--force-build` trusts
+    # desktop-build-stamp.json, which can match SOURCE while asar is still
+    # a Nous pack.
     _unlock_packaged_desktop_for_rebuild(desktop_dir)
 
-    desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
+    desktop_build_cmd = [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "desktop",
+        "--build-only",
+        "--force-build",
+    ]
     # Capture the (very loud) Electron/vite build output into update.log
     # instead of streaming it to the terminal. On the rare nonzero exit,
     # retry once after waiting again for the venv — this covers a

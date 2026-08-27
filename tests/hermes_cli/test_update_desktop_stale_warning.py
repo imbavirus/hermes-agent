@@ -87,14 +87,23 @@ def test_successful_rebuild_returns_true(desktop_env, monkeypatch, capsys):
     )
     assert _run(desktop_dir) is True
     assert len(builds) == 1
+    assert "--force-build" in builds[0]
     assert "Desktop app up to date" in capsys.readouterr().out
 
 
-def test_up_to_date_desktop_returns_true_without_spawning(desktop_env):
+def test_up_to_date_desktop_still_force_builds(desktop_env, monkeypatch):
+    """Stamp-skip is how other machines stayed on a Nous asar at an Infernos SHA."""
     desktop_dir, calls = desktop_env
     calls["build_needed"] = False
+    builds = []
+    monkeypatch.setattr(
+        update_cmd._m(),
+        "_run_logged_subprocess",
+        staticmethod(lambda cmd, cwd=None, env=None: builds.append(cmd) or _Result(0)),
+    )
     assert _run(desktop_dir) is True
-    assert calls["builds"] == 0
+    assert len(builds) == 1
+    assert "--force-build" in builds[0]
 
 
 def test_desktop_never_installed_returns_true(tmp_path, monkeypatch):
