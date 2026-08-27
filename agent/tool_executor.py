@@ -42,6 +42,7 @@ from agent.tool_dispatch_helpers import (
     _plan_tool_batch_segments,
     make_tool_result_message,
 )
+from agent.message_sanitization import demote_stale_tool_images
 from tools.terminal_tool import (
     get_active_env,
 )
@@ -1849,6 +1850,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             effect_disposition=effect_disposition,
         )
         messages.append(tool_message)
+        # Cap retained native-vision embeds so stacked screenshots cannot
+        # 413 the next provider call (xAI byte limits; token estimator undercounts).
+        demote_stale_tool_images(messages)
         risk_metadata = tool_message.get("_tool_output_risk")
         if not _flush_session_db_after_tool_progress(
             agent,
@@ -2764,6 +2768,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             effect_disposition="unknown" if _execution_timed_out else None,
         )
         messages.append(tool_message)
+        # Cap retained native-vision embeds so stacked screenshots cannot
+        # 413 the next provider call (xAI byte limits; token estimator undercounts).
+        demote_stale_tool_images(messages)
         risk_metadata = tool_message.get("_tool_output_risk")
         if not _flush_session_db_after_tool_progress(
             agent,

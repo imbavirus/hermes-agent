@@ -96,6 +96,33 @@ class TestRecoverablePoolProviderXaiOAuth:
         assert result is None
 
 
+# ── _auth_refresh_provider_for_route ───────────────────────────────────────
+
+def _import_auth_refresh_provider_for_route():
+    from agent.auxiliary_client import _auth_refresh_provider_for_route
+    return _auth_refresh_provider_for_route
+
+
+class TestAuthRefreshProviderForRouteXaiOAuth:
+    """auto → api.x.ai must resolve to xai-oauth so 403s refresh, not skip."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        self.route = _import_auth_refresh_provider_for_route()
+
+    def test_auto_api_x_ai_maps_to_xai_oauth(self):
+        assert self.route("auto", "https://api.x.ai/v1/") == "xai-oauth"
+
+    def test_auto_api_x_ai_without_trailing_slash(self):
+        assert self.route("auto", "https://api.x.ai/v1") == "xai-oauth"
+
+    def test_explicit_xai_oauth_unchanged(self):
+        assert self.route("xai-oauth", "https://api.x.ai/v1/") == "xai-oauth"
+
+    def test_auto_unknown_host_stays_auto(self):
+        assert self.route("auto", "https://unknown.example.com/v1/") == "auto"
+
+
 # ── _refresh_provider_credentials (structure check) ─────────────────────────
 
 def _import_refresh_provider_credentials():

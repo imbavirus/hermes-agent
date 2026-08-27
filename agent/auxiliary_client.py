@@ -5076,6 +5076,14 @@ def _auth_refresh_provider_for_route(
         return "anthropic"
     if base_url_host_matches(client_base_url, "inference-api.nousresearch.com"):
         return "nous"
+    # xAI Grok OAuth (main chat + aux compression). Without this, auto-routed
+    # aux calls that land on api.x.ai keep auth_refresh_provider="auto", so the
+    # 403 bad-credentials refresh branch is skipped and compaction falls through
+    # to OpenRouter (or aborts) while main chat still streams fine.
+    if base_url_host_matches(client_base_url, "api.x.ai") or base_url_host_matches(
+        client_base_url, "x.ai"
+    ):
+        return "xai-oauth"
     return normalized
 
 
@@ -9932,20 +9940,23 @@ def _call_llm_impl(
                 and auth_refresh_provider not in {"auto", "", None}
                 and not client_is_nous):
             if _refresh_provider_credentials(auth_refresh_provider):
+                # Always drop both the concrete backend and the route label
+                # ("auto") so the rebuild cannot reuse a stale OAuth bearer.
+                _evict_cached_clients(auth_refresh_provider)
                 if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
-                    # The stale client is cached under the route label
-                    # (e.g. "auto"), not the concrete backend we refreshed.
                     _evict_cached_clients(resolved_provider)
                 logger.info(
                     "Auxiliary %s: refreshed %s credentials after auth error, retrying",
                     task or "call", auth_refresh_provider,
                 )
+                # Do not pass the pre-refresh api_key — OAuth refresh mints a
+                # new access token; reusing the stale one recreates the 403.
                 return _retry_same_provider_sync(
                     task=task,
                     resolved_provider=auth_refresh_provider,
                     resolved_model=resolved_model or final_model,
                     resolved_base_url=resolved_base_url,
-                    resolved_api_key=resolved_api_key,
+                    resolved_api_key=None,
                     resolved_api_mode=resolved_api_mode,
                     main_runtime=main_runtime,
                     final_model=final_model,
@@ -10675,20 +10686,23 @@ async def _async_call_llm_impl(
                 and auth_refresh_provider not in {"auto", "", None}
                 and not client_is_nous):
             if _refresh_provider_credentials(auth_refresh_provider):
+                # Always drop both the concrete backend and the route label
+                # ("auto") so the rebuild cannot reuse a stale OAuth bearer.
+                _evict_cached_clients(auth_refresh_provider)
                 if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
-                    # The stale client is cached under the route label
-                    # (e.g. "auto"), not the concrete backend we refreshed.
                     _evict_cached_clients(resolved_provider)
                 logger.info(
                     "Auxiliary %s (async): refreshed %s credentials after auth error, retrying",
                     task or "call", auth_refresh_provider,
                 )
+                # Do not pass the pre-refresh api_key — OAuth refresh mints a
+                # new access token; reusing the stale one recreates the 403.
                 return await _retry_same_provider_async(
                     task=task,
                     resolved_provider=auth_refresh_provider,
                     resolved_model=resolved_model or final_model,
                     resolved_base_url=resolved_base_url,
-                    resolved_api_key=resolved_api_key,
+                    resolved_api_key=None,
                     resolved_api_mode=resolved_api_mode,
                     final_model=final_model,
                     messages=messages,

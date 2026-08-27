@@ -60,7 +60,6 @@ test('clarify free-text input swallows IME composition Enters (#93528)', () => {
 
 test('both room composers wire onSubmitDraft (#89884)', () => {
   assert.match(source, /onSubmitDraft: submit,/)
-  assert.match(source, /onSubmitDraft: \(\) => submitReply\(id\),/)
 })
 
 test('room log anchors to the bottom with a user-scroll guard (#89835)', () => {
@@ -92,7 +91,41 @@ test('stranded replies get a bounded background harvest after the loop settles (
   // The loop's finally block kicks it off only when members remain stranded.
   assert.match(source, /strandedLeft\.length/)
   // Bounded: interval + max tries, and it yields to a live loop.
+  // Tagged/owed members keep harvesting past the 5-minute bound.
   const harvester = source.slice(source.indexOf('async function harvestStrandedUntilSettled'))
-  assert.match(harvester.slice(0, 1600), /HARVEST_MAX_TRIES/)
-  assert.match(harvester.slice(0, 1600), /room\.running/)
+  assert.match(harvester.slice(0, 2400), /HARVEST_MAX_TRIES/)
+  assert.match(harvester.slice(0, 2400), /owedStranded/)
+  assert.match(harvester.slice(0, 2400), /room.running/)
+})
+
+test('group rooms surface 1:1 tool / thought / task chrome on the live turn', () => {
+  const workspace = source.slice(source.indexOf('function GroupChatWorkspace'))
+  assert.match(workspace, /GroupTurnProgressChrome/)
+  assert.match(workspace, /GroupTodoStack/)
+  assert.match(source, /data-slot': 'group-turn-progress'/)
+  assert.match(source, /data-slot': 'group-todo-stack'/)
+  assert.match(source, /data-slot': 'group-live-turn'/)
+  assert.match(source, /data-slot': 'group-turn-now'/)
+  assert.match(source, /data-slot': 'group-turn-steps'/)
+  assert.match(workspace, /groupProgressNow\(liveProgress\)/)
+  assert.doesNotMatch(
+    workspace.slice(0, workspace.indexOf('function GroupTodoStack') === -1 ? 8000 : workspace.indexOf('function GroupTodoStack')),
+    /is thinking…/
+  )
+  // Live chrome lives above the composer only — a second copy in the
+  // scroll is the "dev is thinking…" double the user screenshotted.
+  assert.equal(
+    [...workspace.matchAll(/jsx\(GroupTurnProgressChrome, \{ progress: liveProgress, live: true \}/g)].length,
+    1,
+    'live progress chrome belongs above the composer only'
+  )
+  assert.match(workspace, /jsx\(GroupTurnProgressChrome, \{ progress: entry\.progress, live: false \}/)
+})
+
+test('group Tasks stack defaults expanded like 1:1 todos', () => {
+  const stack = source.slice(source.indexOf('function GroupTodoStack'))
+  const next = stack.indexOf('\nfunction ')
+  const body = stack.slice(0, next === -1 ? undefined : next)
+  assert.match(body, /useState\(true\)/)
+  assert.doesNotMatch(body, /useState\(false\)/)
 })

@@ -5654,6 +5654,28 @@ def run_conversation(
                     )
 
                 if is_payload_too_large:
+                    # xAI (and similar gateways) 413 on *byte* payload size.
+                    # Native vision tool results embed multi-MB base64 images
+                    # that the token estimator undercounts (~1500 tok/image).
+                    # Evict retained vision payloads from the CANONICAL
+                    # history first — stripping only api_messages left the
+                    # next outer-loop rebuild re-injecting every screenshot
+                    # and burning the compression budget on a payload that
+                    # never actually shrank.
+                    _imgs_evicted = _strip_images_from_messages(messages)
+                    if _imgs_evicted:
+                        _strip_images_from_messages(api_messages)
+                        agent._buffer_status(
+                            "⚠️  Request payload too large (413) — removed retained "
+                            "vision payloads from history and retrying..."
+                        )
+                        conversation_history = conversation_history_after_compression(
+                            agent, messages, conversation_history
+                        )
+                        time.sleep(2)
+                        _retry.restart_with_compressed_messages = True
+                        break
+
                     compression_attempts += 1
                     if compression_attempts > max_compression_attempts:
                         # Terminal — surface the buffered retry trace.

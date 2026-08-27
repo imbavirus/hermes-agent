@@ -153,6 +153,28 @@ test('advanced capability scope keeps Desktop identity separate from backend tar
   })
 })
 
+test('requestForBot: local prompt.submit uses the live socket 1800s deadline', async () => {
+  const ctx = runtime()
+  const calls = []
+  ctx.host.request = async (method, params) => {
+    calls.push(['active', method, params])
+    return {}
+  }
+  ctx.host.getGateway = () => ({
+    request: async (method, params, timeout) => {
+      calls.push(['gateway', method, timeout])
+      return { ok: true, params }
+    }
+  })
+
+  const { requestForBot } = ctx.__x
+  await requestForBot({ name: 'local-bot' }, 'prompt.submit', { text: 'hi' })
+
+  assert.equal(calls[0][0], 'gateway')
+  assert.equal(calls[0][1], 'prompt.submit')
+  assert.equal(calls[0][2], 1_800_000)
+})
+
 test('groupMemberKey: local members keep bare names (persisted-room compat), remote members are source-qualified', () => {
   const ctx = runtime()
   const { groupMemberKey } = ctx.__x

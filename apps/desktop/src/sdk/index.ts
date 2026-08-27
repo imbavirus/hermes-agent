@@ -41,7 +41,14 @@ import {
 import { onGatewayEvent } from '@/contrib/events'
 import { registry } from '@/contrib/registry'
 import type { WorkspaceMode } from '@/contrib/types'
-import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway } from '@/hermes'
+import {
+  deleteProfile,
+  getLogs,
+  getStatus,
+  hermesApi,
+  type HermesGateway,
+  PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
+} from '@/hermes'
 import {
   $gateway,
   activeGatewayConnectionId,
@@ -1317,6 +1324,13 @@ export const host = {
 
     if (!gateway) {
       throw new Error('Hermes gateway unavailable')
+    }
+
+    // prompt.submit ACKs after the agent is built, not after the turn.
+    // The 30s default is why group-chat members "time out" / never report
+    // back (#55024 was the 1:1 fix; plugins were still on the default).
+    if (method === 'prompt.submit') {
+      return gateway.request<T>(method, params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
     }
 
     return gateway.request<T>(method, params)

@@ -8,7 +8,7 @@ const pluginSource = readFileSync(new URL('../plugin.js', import.meta.url), 'utf
 /** Load the plugin in a vm with a scripted cli.exec so member turns are
  *  deterministic. `turnScript(profile, prompt)` returns the member's reply
  *  text (or throws to simulate a failed turn). */
-function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approvalUntilResumeCall, conflictOnce = false, deferredTimers = false } = {}) {
+function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approvalUntilResumeCall, conflictOnce = false, deferredTimers = false, redirectReject, steerReject } = {}) {
   const values = new Map()
   const atom = initial => {
     const slot = { get: () => values.get(slot), set: value => {
@@ -21,6 +21,9 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     return slot
   }
   const calls = []
+  const redirects = []
+  const steers = []
+  const queuedSubmits = []
   const clarifyResponds = []
   const approvalResponds = []
   const requests = []
@@ -40,7 +43,15 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
 
   const resolveSession = (profile, target) => {
     const stored = runtimeToStored.get(target) || (sessions.has(target) ? target : titleToStored.get(`${profile}::${target}`))
-    return stored ? sessions.get(stored) : null
+    if (stored) {
+      return sessions.get(stored)
+    }
+    for (const session of sessions.values()) {
+      if (session.runtime === target || session.stored === target) {
+        return session
+      }
+    }
+    return null
   }
   const context = {
     atom,
@@ -53,6 +64,8 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
       return 0
     },
     clearTimeout: () => undefined,
+    setInterval: () => 0,
+    clearInterval: () => undefined,
     PALETTE_AREA: 'palette',
     COMPOSER_AREAS: { middleware: 'middleware' },
     document: { getElementById: () => null, createElement: () => ({}), head: { appendChild: () => undefined } },
@@ -156,13 +169,40 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
           return {
             session_id: session.runtime,
             session_key: session.stored,
-            message_count: session.messages.length,
-            messages: [...session.messages],
+            message_count: session.compactedCount ?? session.messages.length,
+            messages: session.messagesOmitted ? [] : [...session.messages],
+            messages_omitted: Boolean(session.messagesOmitted),
             inflight: busy,
             running: busy,
+            hydrating: Boolean(session.hydrating),
+            status: session.hydrating ? 'resuming' : busy ? 'streaming' : 'idle',
             ...(pendingClarify ? { pending_clarify: pendingClarify } : {}),
             ...(pendingApproval ? { pending_approval: pendingApproval } : {})
           }
+        }
+        if (method === 'session.redirect') {
+          const session = resolveSession(null, params.session_id)
+          if (!session) {
+            throw new Error(`runtime session not found: ${params.session_id}`)
+          }
+          if (redirectReject && redirectReject[session.profile]) {
+            return { status: 'rejected' }
+          }
+          redirects.push({ profile: session.profile, text: params.text, runtime: session.runtime })
+          session.messages.push({ role: 'user', content: params.text })
+          return { status: 'redirected', text: params.text }
+        }
+        if (method === 'session.steer') {
+          const session = resolveSession(null, params.session_id)
+          if (!session) {
+            throw new Error(`runtime session not found: ${params.session_id}`)
+          }
+          if (steerReject && steerReject[session.profile]) {
+            return { status: 'rejected' }
+          }
+          steers.push({ profile: session.profile, text: params.text, runtime: session.runtime })
+          session.messages.push({ role: 'user', content: params.text })
+          return { status: 'queued', text: params.text }
         }
         if (method === 'prompt.submit') {
           const session = resolveSession(null, params.session_id)
@@ -170,6 +210,15 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
             throw new Error(`runtime session not found: ${params.session_id}`)
           }
           session.messages.push({ role: 'user', content: params.text })
+          if (params.queued) {
+            queuedSubmits.push({
+              profile: session.profile,
+              prompt: params.text,
+              runtime: session.runtime,
+              stored: session.stored
+            })
+            return { status: 'queued' }
+          }
           calls.push({
             profile: session.profile,
             prompt: params.text,
@@ -204,7 +253,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES, membersOwedMentionTurn, endGroupThread, isGroupThreadEnded, hideGroupThread, showGroupThread, listGroupThreads, startComposingNewThread, addGroupChatMember, removeGroupChatMember, kickGroupChatIfMentionsOwed, $groupTurnProgress, summarizeGroupToolRun, groupProgressNow, groupToolStepLine, groupToolsLooping, toolsFromGroupResume, applyGroupToolEvent, snapshotGroupTurnProgress, rememberGroupRuntime, injectGroupDeltaIntoBusyMember, steerOrQueueGroupMember, extractGroupAssistantReply, extractGroupAssistantText };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -212,7 +261,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     storage: { get: () => null, set: (key, value) => storageWrites.set(key, value) },
     register: () => undefined
   })
-  return { ...context.__gc, approvalResponds, calls, clarifyResponds, host: context.host, requests, sessions, storageWrites, sharedUiMeta, uiMetaRevisions }
+  return { ...context.__gc, approvalResponds, calls, clarifyResponds, host: context.host, requests, sessions, storageWrites, sharedUiMeta, uiMetaRevisions, queuedSubmits, redirects, steers }
 }
 
 const MEMBERS = [{ name: 'research', title: '' }, { name: 'builder', title: '' }, { name: 'ops', title: 'The Ops' }]
@@ -275,6 +324,246 @@ test('a member @-mentioned by another bot joins the NEXT round', async () => {
   const texts = roomLog(gc, 'Core').map(e => `${e.from.name}: ${e.text}`)
   assert.equal(texts.some(t => t.startsWith('research:')), true)
   assert.equal(texts.some(t => t.startsWith('builder: On it')), true)
+})
+
+test('mention parse: email-like @ is not a bot tag', () => {
+  const gc = load(() => '(pass)')
+  const parsed = gc.parseGroupChatMentions('mail ops@builder.com then ping @ops', MEMBERS)
+  assert.equal(parsed.mentioned.has('ops'), true)
+  assert.equal(parsed.mentioned.has('builder'), false)
+})
+
+test('a @mention on the last allowed round still pulls the named member in', async () => {
+  let researchN = 0
+  let opsN = 0
+  const gc = load(profile => {
+    if (profile === 'research') {
+      researchN += 1
+      return researchN === 1 ? 'Need @ops first.' : 'Back to you @ops.'
+    }
+    if (profile === 'ops') {
+      opsN += 1
+      return opsN === 1 ? 'Got it @research' : 'Your turn @builder'
+    }
+    if (profile === 'builder') return 'Got it. On it.'
+    return '(pass)'
+  })
+  const seated = [
+    { name: 'research', title: '' },
+    { name: 'ops', title: 'The Ops' },
+    { name: 'builder', title: '' }
+  ]
+
+  gc.sendToGroupChat('Core', seated, '@research start')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().Core || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const texts = roomLog(gc, 'Core').map(e => `${e.from.name}: ${e.text}`)
+  assert.equal(texts.some(t => t.includes('Your turn @builder')), true, texts.join(' | '))
+  assert.equal(texts.some(t => t.startsWith('builder: Got it')), true, texts.join(' | '))
+})
+
+test('a harvested late reply that @-mentions a peer starts a new drive', async () => {
+  const gc = load(profile => (profile === 'builder' ? 'Picking that up.' : '(pass)'))
+  const seated = [{ name: 'research', title: '' }, { name: 'builder', title: '' }]
+
+  gc.updateGroupChat('LatePing', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@research dig in', at: 1, thread: 'legacy' }]
+    r.stranded = { research: 0 }
+    r.sessions = { research: 'sid-research' }
+    r.running = false
+    return r
+  })
+  gc.sessions.set('sid-research', {
+    stored: 'sid-research',
+    runtime: 'rt-research',
+    profile: 'research',
+    title: 'Group: LatePing',
+    messages: [
+      { role: 'user', content: 'the turn prompt' },
+      { role: 'assistant', content: 'Done. @builder please ship it.' }
+    ]
+  })
+
+  await gc.harvestStrandedGroupReply('LatePing', { name: 'research', title: '' }, seated)
+  for (let i = 0; i < 400 && (gc.$groupChats.get().LatePing || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const texts = roomLog(gc, 'LatePing').map(e => `${e.from.name}: ${e.text}`)
+  assert.equal(texts.some(t => t.startsWith('research: Done')), true)
+  assert.equal(texts.some(t => t.startsWith('builder: Picking')), true)
+})
+
+test('endGroupThread marks the thread ended and stops its drive', async () => {
+  const gc = load(() => 'still going @everyone')
+  const seated = [{ name: 'research', title: '' }]
+  const thread = gc.sendToGroupChat('Core', seated, 'keep talking')
+  assert.equal((gc.$groupChats.get().Core || {}).running, true)
+  gc.endGroupThread('Core', thread)
+  assert.equal(gc.isGroupThreadEnded('Core', thread), true)
+  assert.equal((gc.$groupChats.get().Core || {}).running, false)
+  assert.equal((gc.$groupChats.get().Core || {}).endedThreads[thread], true)
+  assert.equal((gc.$groupChats.get().Core || {}).hiddenThreads[thread], true)
+})
+
+test('hideGroupThread hides the thread and can be shown again from the list', () => {
+  const gc = load(() => '(pass)')
+  const seated = [{ name: 'research', title: '' }]
+  const a = gc.sendToGroupChat('Core', seated, 'first topic')
+  const b = gc.sendToGroupChat('Core', seated, 'second topic')
+  const listed = gc.listGroupThreads(gc.$groupChats.get().Core)
+  assert.equal(listed.length >= 2, true)
+  gc.hideGroupThread('Core', a)
+  assert.equal((gc.$groupChats.get().Core || {}).hiddenThreads[a], true)
+  assert.notEqual((gc.$groupChats.get().Core || {}).activeThread, a)
+  gc.showGroupThread('Core', a)
+  assert.equal((gc.$groupChats.get().Core || {}).hiddenThreads[a], undefined)
+  assert.equal((gc.$groupChats.get().Core || {}).activeThread, a)
+  void b
+})
+
+test('live thread rows exclude hidden; Hidden view is hidden-only', () => {
+  const gc = load(() => '(pass)')
+  const seated = [{ name: 'research', title: '' }]
+  const live = gc.sendToGroupChat('Core', seated, 'stay visible')
+  const hid = gc.sendToGroupChat('Core', seated, 'put away')
+  gc.hideGroupThread('Core', hid)
+  const room = gc.$groupChats.get().Core
+  const all = gc.listGroupThreads(room)
+  const liveRows = all.filter(thread => !room.hiddenThreads?.[thread.id])
+  const hiddenRows = all.filter(thread => room.hiddenThreads?.[thread.id])
+  assert.equal(liveRows.some(thread => thread.id === hid), false)
+  assert.equal(liveRows.some(thread => thread.id === live), true)
+  assert.equal(hiddenRows.some(thread => thread.id === hid), true)
+  assert.equal(hiddenRows.some(thread => thread.id === live), false)
+})
+
+test('default send continues activeThread; composingNew mints a fresh one', () => {
+  const gc = load(() => '(pass)')
+  const seated = [{ name: 'research', title: '' }]
+  const first = gc.sendToGroupChat('Core', seated, 'topic one')
+  assert.equal((gc.$groupChats.get().Core || {}).activeThread, first)
+  const continued = gc.sendToGroupChat('Core', seated, 'follow up', first)
+  assert.equal(continued, first)
+  gc.startComposingNewThread('Core')
+  assert.equal((gc.$groupChats.get().Core || {}).composingNew, true)
+  const minted = gc.sendToGroupChat('Core', seated, 'brand new')
+  assert.notEqual(minted, first)
+  assert.equal((gc.$groupChats.get().Core || {}).activeThread, minted)
+  assert.equal((gc.$groupChats.get().Core || {}).composingNew, false)
+})
+
+test('hiddenThreads and activeThread persist on the durable room map', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Keep', r => {
+    r.hiddenThreads = { 't-hid': true }
+    r.activeThread = 't-live'
+    return r
+  })
+  const durable = gc.storageWrites.get('group-chats')
+  assert.equal(durable.Keep.hiddenThreads['t-hid'], true)
+  assert.equal(durable.Keep.activeThread, 't-live')
+})
+
+test('endedThreads persist on the durable room map', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Keep', r => {
+    r.endedThreads = { 't-old': true }
+    return r
+  })
+  const durable = gc.storageWrites.get('group-chats')
+  assert.equal(durable.Keep.endedThreads['t-old'], true)
+})
+
+test('addGroupChatMember seats a bot; remove unseats; last member is refused', async () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Core', r => {
+    r.members = [
+      { name: 'research', handle: 'research', remoteSource: true, sourceScoped: true },
+      { name: 'builder', handle: 'builder', remoteSource: true, sourceScoped: true }
+    ]
+    return r
+  })
+  const added = await gc.addGroupChatMember('Core', { name: 'tester', title: '' })
+  assert.equal(added.ok, true)
+  const names = (gc.$groupChats.get().Core.members || []).map(m => m.name)
+  assert.equal(names.includes('tester'), true)
+  const dup = await gc.addGroupChatMember('Core', { name: 'tester', title: '' })
+  assert.equal(dup.ok, false)
+  assert.equal(dup.reason, 'already')
+  const removed = await gc.removeGroupChatMember('Core', { name: 'tester' })
+  assert.equal(removed.ok, true)
+  assert.equal((gc.$groupChats.get().Core.members || []).some(m => m.name === 'tester'), false)
+  await gc.removeGroupChatMember('Core', { name: 'builder' })
+  const last = await gc.removeGroupChatMember('Core', { name: 'research' })
+  assert.equal(last.ok, false)
+  assert.equal(last.reason, 'last')
+})
+
+test('self-mention does not leave the speaker owed another turn', () => {
+  const gc = load(() => '(pass)')
+  const log = [
+    { from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 },
+    { from: { kind: 'member', name: 'builder' }, text: 'On it @builder.', at: 2 }
+  ]
+  const owed = gc.membersOwedMentionTurn(log, MEMBERS)
+
+  assert.equal(
+    owed.some(member => member.name === 'builder'),
+    false,
+    `builder still owed after speaking: ${owed.map(m => m.name).join(',')}`
+  )
+})
+
+test('mention parse: email@dev.com is not a @dev tag', () => {
+  const gc = load(() => '(pass)')
+  const seated = [...MEMBERS, { name: 'dev', title: '' }]
+  const emailOnly = gc.parseGroupChatMentions('contact email@dev.com please', seated)
+  const realTag = gc.parseGroupChatMentions('hey @dev check email@dev.com', seated)
+
+  assert.equal(emailOnly.mentioned.has('dev'), false)
+  assert.equal(realTag.mentioned.has('dev'), true)
+  assert.equal(realTag.mentioned.has('ops'), false)
+})
+
+test('a mentioned member who (pass)es is not re-queued past MAX_ROUNDS', async () => {
+  let builderN = 0
+  const gc = load(profile => {
+    if (profile === 'research') return 'Still need @builder on this.'
+    if (profile === 'builder') {
+      builderN += 1
+      return '(pass)'
+    }
+    return '(pass)'
+  })
+  const seated = [{ name: 'research', title: '' }, { name: 'builder', title: '' }]
+
+  gc.sendToGroupChat('Debt', seated, '@research start')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().Debt || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  assert.equal((gc.$groupChats.get().Debt || {}).running, false)
+  assert.equal(builderN, 1, `builder was called ${builderN} times after passing; pass must clear mention debt`)
+})
+
+test('ending thread A does not stop the drive for thread B', () => {
+  const gc = load(() => 'still going')
+  const seated = [{ name: 'research', title: '' }]
+  const threadA = gc.sendToGroupChat('Core', seated, 'topic A keep talking')
+  const threadB = gc.sendToGroupChat('Core', seated, 'topic B keep talking')
+
+  assert.equal((gc.$groupChats.get().Core || {}).driveThread, threadB)
+  assert.equal((gc.$groupChats.get().Core || {}).running, true)
+
+  gc.endGroupThread('Core', threadA)
+
+  assert.equal(gc.isGroupThreadEnded('Core', threadA), true)
+  assert.equal(gc.isGroupThreadEnded('Core', threadB), false)
+  assert.equal((gc.$groupChats.get().Core || {}).running, true)
+  assert.equal((gc.$groupChats.get().Core || {}).driveThread, threadB)
 })
 
 test('settle: everyone passing ends the room turn with only the user message logged', async () => {
@@ -1126,7 +1415,8 @@ test('source contract: workspace + main-window door + prompt rules are wired', (
   assert.match(pluginSource, /function openGroupChat\(/)
   assert.match(pluginSource, /typeof host\.openWorkspace === 'function'/)
   assert.match(pluginSource, /\$groupChatWorkspace\.set\(group\)/)
-  assert.match(pluginSource, /reply with exactly "\(pass\)"/i)
+  assert.match(pluginSource, /reply exactly "\(pass\)"/i)
+  assert.match(pluginSource, /full 1:1 conclusive answer/)
   assert.match(pluginSource, /\[Group chat: "\$\{groupName\}"\]/)
 })
 
@@ -1146,16 +1436,19 @@ test('group selection follows main-window open and close', () => {
 
   onClose()
   assert.equal(gc.$groupChatWorkspace.get(), null)
-  assert.equal(gc.shouldRenderGroupChatInPane('Core'), true)
+  // Door exists: in-pane stays off even after the tab closes (roster returns).
+  assert.equal(gc.shouldRenderGroupChatInPane('Core'), false)
 })
 
-test('older and failed workspace hosts keep the in-pane group fallback', () => {
+test('older desktops without openWorkspace keep the in-pane group fallback', () => {
   const older = load(() => '(pass)')
 
   older.openGroupChat('Core')
   assert.equal(older.$groupChatWorkspace.get(), 'Core')
   assert.equal(older.shouldRenderGroupChatInPane('Core'), true)
+})
 
+test('a throwing openWorkspace does not steal the Bots roster', () => {
   const failed = load(() => '(pass)')
 
   failed.host.openWorkspace = () => {
@@ -1164,7 +1457,7 @@ test('older and failed workspace hosts keep the in-pane group fallback', () => {
 
   failed.openGroupChat('Ops')
   assert.equal(failed.$groupChatWorkspace.get(), 'Ops')
-  assert.equal(failed.shouldRenderGroupChatInPane('Ops'), true)
+  assert.equal(failed.shouldRenderGroupChatInPane('Ops'), false)
 })
 
 test('main-tab ownership is recorded before the selection atom paints (#89788 follow-up)', () => {
@@ -1561,24 +1854,11 @@ test('stranded harvest: a rescued reply prefers the substantive answer over a tr
   assert.equal(gc.$groupChats.get().Rescue.stranded.research, undefined, 'marker consumed')
 })
 
-test('stranded + still busy: the round loop never re-submits into a member whose harvest just confirmed they are still running', async () => {
-  // research is confirmed busy on exactly its first two session.resume
-  // calls — the number of harvest-only touches the FIXED code makes across
-  // two rounds. If the responder guard is missing, research gets re-
-  // selected and picks up two EXTRA resume calls of its own (session
-  // resolution + turn baseline) before its very first post-resubmit poll
-  // — call #4 — which then reports done, so the mutated run still finishes
-  // fast (no real wall-clock wait) while still proving the resubmission
-  // happened.
+test('stranded + still busy: a peer @tag steers the live turn instead of prompt.submit', async () => {
   const gc = load(profile => (profile === 'builder' ? 'builder here, all good' : '(pass)'), {
-    busyUntilResumeCall: { research: 2 }
+    busyUntilResumeCall: { research: 99 }
   })
 
-  // research's session is pre-seeded and resolvable, exactly like the
-  // sibling stranded-harvest test above — its stranded marker is the
-  // pre-thread bare-number shape (still supported: harvestStrandedGroupReply
-  // normalizes both shapes, and presence in `stranded` is what the round-loop
-  // guard checks, not the marker's value shape).
   gc.sessions.set('sid-research', {
     stored: 'sid-research',
     runtime: 'rt-research',
@@ -1587,17 +1867,10 @@ test('stranded + still busy: the round loop never re-submits into a member whose
     messages: []
   })
 
-  // research is already stranded from an earlier (unmodeled) timeout, and
-  // its session is STILL genuinely running per session.resume. Both members
-  // are mentioned, so without the busy-responder guard both would be
-  // re-selected this round — and resubmitting into research's live session
-  // would trigger the gateway's default busy policy (redirect/hard-
-  // interrupt), destroying the very turn the stranded marker exists to wait
-  // out.
   gc.updateGroupChat('Grind', r => {
     r.stranded = { research: 0 }
     r.sessions = { research: 'sid-research' }
-    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@research @builder status?', at: 1 }]
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@research @builder status?', at: 1, thread: 'legacy' }]
     r.watermarks = { 'legacy::research': 0, 'legacy::builder': 0 }
     return r
   })
@@ -1607,14 +1880,92 @@ test('stranded + still busy: the round loop never re-submits into a member whose
   assert.equal(
     gc.calls.filter(c => c.profile === 'research').length,
     0,
-    'research (still busy) must never receive a new prompt.submit'
+    'research (still busy) must never receive a live prompt.submit'
   )
-  assert.equal(
-    gc.$groupChats.get().Grind.stranded.research,
-    0,
-    'marker survives untouched — harvest confirmed research is still running'
+  assert.ok(gc.redirects.filter(c => c.profile === 'research').length >= 1, 'busy @research is redirected like 1:1 Enter')
+  assert.match(gc.redirects[0].text, /@research @builder status/)
+  assert.ok(gc.$groupChats.get().Grind.stranded.research, 'steered member stays stranded so harvest posts the reply')
+  assert.equal(gc.calls.filter(c => c.profile === 'builder').length, 1, 'builder (idle) still gets its turn')
+})
+
+test('busy @mention falls through redirect → steer → queued prompt.submit', async () => {
+  const gc = load(() => '(pass)', {
+    busyUntilResumeCall: { research: 99 },
+    redirectReject: { research: true },
+    steerReject: { research: true }
+  })
+
+  gc.sessions.set('sid-research', {
+    stored: 'sid-research',
+    runtime: 'rt-research',
+    profile: 'research',
+    title: 'Group: Queue',
+    messages: []
+  })
+
+  gc.updateGroupChat('Queue', r => {
+    r.stranded = { research: { before: 0, thread: 't1' } }
+    r.sessions = { research: 'sid-research' }
+    r.log = [
+      { from: { kind: 'user', name: 'You' }, text: 'status', at: 1, thread: 't1' },
+      { from: { kind: 'member', name: 'builder' }, text: '@research load the cache', at: 2, thread: 't1' }
+    ]
+    r.watermarks = { 't1::research': 0 }
+    r.running = true
+    return r
+  })
+
+  const status = await gc.injectGroupDeltaIntoBusyMember(
+    'Queue',
+    { name: 'research', title: '' },
+    [{ name: 'builder', title: '' }, { name: 'research', title: '' }],
+    't1'
   )
-  assert.equal(gc.calls.filter(c => c.profile === 'builder').length, 1, 'builder (not stranded) still gets its turn')
+
+  assert.equal(status, 'queued')
+  assert.equal(gc.redirects.length, 0)
+  assert.equal(gc.steers.length, 0)
+  assert.equal(gc.queuedSubmits.length, 1)
+  assert.match(gc.queuedSubmits[0].prompt, /@research load the cache/)
+  assert.equal(gc.calls.length, 0, 'queued:true must not run as a live turn')
+  assert.ok(gc.$groupChats.get().Queue.stranded.research, 'queued member is stranded so harvest posts')
+  assert.equal(gc.$groupChats.get().Queue.stranded.research.thread, 't1')
+})
+
+test('kickGroupChatIfMentionsOwed steers a stranded @tag even while the room is running', async () => {
+  const gc = load(() => '(pass)', { busyUntilResumeCall: { research: 99 } })
+
+  gc.sessions.set('sid-research', {
+    stored: 'sid-research',
+    runtime: 'rt-research',
+    profile: 'research',
+    title: 'Group: KickBusy',
+    messages: []
+  })
+
+  gc.updateGroupChat('KickBusy', r => {
+    r.stranded = { research: { before: 2, thread: 't1' } }
+    r.sessions = { research: 'sid-research' }
+    r.log = [
+      { from: { kind: 'user', name: 'You' }, text: 'status', at: 1, thread: 't1' },
+      { from: { kind: 'member', name: 'builder' }, text: '@research load the cache', at: 2, thread: 't1' }
+    ]
+    r.watermarks = { 't1::research': 0 }
+    r.running = true
+    return r
+  })
+
+  gc.kickGroupChatIfMentionsOwed(
+    'KickBusy',
+    [{ name: 'builder', title: '' }, { name: 'research', title: '' }],
+    't1'
+  )
+  for (let i = 0; i < 40; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  assert.equal(gc.redirects.filter(c => c.profile === 'research').length, 1)
+  assert.equal(gc.calls.length, 0)
 })
 
 test('stranded harvest: a late (pass) or no-new-message consumes the marker without posting', async () => {
@@ -1643,6 +1994,102 @@ test('stranded harvest: a late (pass) or no-new-message consumes the marker with
   assert.equal(gc.$groupChats.get().Quiet2.stranded.builder, undefined)
 })
 
+test('stranded harvest: trailing (pass) after a writeup still posts the writeup', async () => {
+  const gc = load(() => '(pass)')
+  const writeup = 'HTML 500 was print flush. Studio **97288**. @tester re-POST.'
+
+  gc.updateGroupChat('WatchPass', r => {
+    r.stranded = { research: 1 }
+    r.sessions = { research: 'sid-research' }
+    return r
+  })
+  gc.sessions.set('sid-research', {
+    stored: 'sid-research',
+    runtime: 'rt-research',
+    profile: 'research',
+    title: 'Group: WatchPass',
+    messages: [
+      { role: 'user', content: 'old' },
+      { role: 'user', content: 'the turn prompt' },
+      { role: 'assistant', content: writeup },
+      { role: 'user', content: '[IMPORTANT: Background process matched watch pattern "Starting server"]' },
+      { role: 'assistant', content: '(pass)' }
+    ]
+  })
+
+  await gc.harvestStrandedGroupReply('WatchPass', { name: 'research', title: '' })
+
+  const texts = roomLog(gc, 'WatchPass').map(e => e.text)
+  assert.equal(texts.some(t => t === writeup), true, texts.join(' | '))
+  assert.equal(texts.some(t => t === '(pass)'), false)
+  assert.equal(gc.$groupChats.get().WatchPass.stranded.research, undefined)
+})
+
+test('stranded harvest: compaction (count drop) still posts the last assistant line', async () => {
+  const gc = load(() => '(pass)')
+
+  gc.updateGroupChat('Compact', r => {
+    r.stranded = { research: 80 }
+    r.sessions = { research: 'sid-research' }
+    return r
+  })
+  gc.sessions.set('sid-research', {
+    stored: 'sid-research',
+    runtime: 'rt-research',
+    profile: 'research',
+    title: 'Group: Compact',
+    compactedCount: 6,
+    messages: [
+      { role: 'user', content: 'old' },
+      { role: 'assistant', content: '(pass)' },
+      { role: 'user', content: '[compaction]' },
+      { role: 'user', content: '@research load the cache' },
+      { role: 'assistant', content: '252976 is dead. Cache loaded.' }
+    ]
+  })
+
+  await gc.harvestStrandedGroupReply('Compact', { name: 'research', title: '' })
+
+  const texts = roomLog(gc, 'Compact').map(e => e.text)
+  assert.equal(texts.some(t => /252976 is dead/.test(t)), true, 'compaction must not swallow the finished reply')
+  assert.equal(gc.$groupChats.get().Compact.stranded.research, undefined)
+})
+
+test('stranded harvest: a late (pass) still kicks a peer @mention', async () => {
+  const gc = load(profile => (profile === 'research' ? 'Loading the cache now.' : '(pass)'))
+  const seated = [{ name: 'builder', title: '' }, { name: 'research', title: '' }]
+
+  gc.updateGroupChat('KickPass', r => {
+    r.log = [
+      { from: { kind: 'user', name: 'You' }, text: 'status', at: 1, thread: 't1' },
+      { from: { kind: 'member', name: 'builder' }, text: 'Gate red. @research load the cache', at: 2, thread: 't1' }
+    ]
+    r.stranded = { builder: { before: 2, thread: 't1' } }
+    r.sessions = { builder: 'sid-builder' }
+    r.watermarks = { 't1::builder': 2 }
+    r.running = false
+    return r
+  })
+  gc.sessions.set('sid-builder', {
+    stored: 'sid-builder',
+    runtime: 'rt-builder',
+    profile: 'builder',
+    title: 'Group: KickPass',
+    messages: [
+      { role: 'user', content: 'prompt' },
+      { role: 'assistant', content: '(pass)' }
+    ]
+  })
+
+  await gc.harvestStrandedGroupReply('KickPass', { name: 'builder', title: '' }, seated)
+  for (let i = 0; i < 400 && (gc.$groupChats.get().KickPass || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const texts = roomLog(gc, 'KickPass').map(e => `${e.from.name}: ${e.text}`)
+  assert.equal(texts.some(t => t.startsWith('research: Loading')), true, 'pass-harvest must still kick @research')
+})
+
 test('stranded markers persist so late replies survive a window reload', async () => {
   const gc = load(() => '(pass)')
 
@@ -1656,15 +2103,176 @@ test('stranded markers persist so late replies survive a window reload', async (
   assert.equal(durable.Persist.stranded.research, 3, 'stranded marker rides the durable map')
 })
 
-test('source contract: long visible turns extend the deadline up to a hard cap', () => {
+test('summarizeGroupToolRun matches 1:1 wording', () => {
+  const gc = load(() => '(pass)')
+  assert.equal(
+    gc.summarizeGroupToolRun([
+      { name: 'search_files', args: { path: 'plugin.js' } },
+      { name: 'read_file', args: { path: 'a.ts' } },
+      { name: 'skill_view', args: { name: 'x' } }
+    ], false),
+    'Explored 2 files, used 1 tool'
+  )
+  assert.equal(
+    gc.summarizeGroupToolRun([{ name: 'read_file', args: { path: 'plugin.js' }, pending: true }], true),
+    'Exploring plugin.js'
+  )
+  assert.equal(gc.summarizeGroupToolRun([], true), 'is thinking…')
+})
+
+test('tool.start/complete events fill live progress and snapshot onto a reply', () => {
+  const gc = load(() => 'done')
+  const member = { name: 'research', title: '' }
+  gc.rememberGroupRuntime('Radar', member, 'rt-research')
+  gc.applyGroupToolEvent('start', {
+    session_id: 'rt-research',
+    payload: { tool_id: 't1', name: 'search_files', args: { path: 'hermes-bots' } }
+  })
+  gc.applyGroupToolEvent('complete', {
+    session_id: 'rt-research',
+    payload: {
+      tool_id: 't1',
+      name: 'search_files',
+      args: { path: 'hermes-bots' },
+      result: 'ok'
+    }
+  })
+  gc.applyGroupToolEvent('complete', {
+    session_id: 'rt-research',
+    payload: {
+      tool_id: 't2',
+      name: 'todo',
+      todos: [
+        { id: '1', content: 'Map the path', status: 'completed' },
+        { id: '2', content: 'Fix harvest', status: 'in_progress' }
+      ]
+    }
+  })
+
+  const live = gc.$groupTurnProgress.get()['Radar::research']
+  assert.match(live.summary, /Explor/)
+  assert.equal(live.todos.length, 2)
+  assert.equal(live.todos.filter(t => t.status === 'completed').length, 1)
+
+  const snap = gc.snapshotGroupTurnProgress('Radar', member)
+  assert.ok(snap.summary)
+  assert.equal(snap.todos.length, 2)
+})
+
+test('live now-line tracks the current tool, not just "is thinking"', () => {
+  const gc = load(() => 'done')
+  assert.equal(
+    gc.groupToolStepLine({ name: 'terminal', args: { command: 'curl -N http://127.0.0.1:3006' }, pending: true }, true),
+    'Running curl -N http://127.0.0.1:3006'
+  )
+  assert.equal(
+    gc.groupProgressNow({
+      tools: [{ name: 'read_file', args: { path: 'plugin.js' }, pending: true }],
+      thinkingPending: true,
+      busy: true
+    }),
+    'Exploring plugin.js'
+  )
+  assert.equal(
+    gc.groupProgressNow({ tools: [], thinkingText: 'Okay tester I hear you, checking Studio 103640.', busy: true }),
+    'Okay tester I hear you, checking Studio 103640.'
+  )
+  assert.equal(gc.groupProgressNow({ tools: [], busy: true, thinkingPending: true }), 'Heard you — working.')
+})
+
+test('same tool+target four times in a row is a loop to pull out of', () => {
+  const gc = load(() => 'done')
+  const once = { name: 'read_file', args: { path: 'plugin.js' } }
+  assert.equal(gc.groupToolsLooping([once, once, once]), false)
+  assert.equal(gc.groupToolsLooping([once, once, once, once]), true)
+  assert.equal(
+    gc.groupToolsLooping([once, once, once, { name: 'terminal', args: { command: 'nvidia-smi' } }]),
+    false
+  )
+})
+
+test('stranded harvest: a hydrating / omitted resume keeps the marker', async () => {
+  const gc = load(() => '(pass)')
+
+  gc.updateGroupChat('Hydrate', r => {
+    r.stranded = { research: 0 }
+    r.sessions = { research: 'sid-research' }
+    return r
+  })
+  gc.sessions.set('sid-research', {
+    stored: 'sid-research',
+    runtime: 'rt-research',
+    profile: 'research',
+    title: 'Group: Hydrate',
+    hydrating: true,
+    messages: [
+      { role: 'user', content: 'prompt' },
+      { role: 'assistant', content: 'not yet visible to a cold resume' }
+    ]
+  })
+
+  await gc.harvestStrandedGroupReply('Hydrate', { name: 'research', title: '' })
+  assert.equal(gc.$groupChats.get().Hydrate.stranded.research, 0, 'hydrating must not consume the marker')
+  assert.equal(roomLog(gc, 'Hydrate').length, 0)
+
+  gc.sessions.get('sid-research').hydrating = false
+  gc.sessions.get('sid-research').messagesOmitted = true
+  await gc.harvestStrandedGroupReply('Hydrate', { name: 'research', title: '' })
+  assert.equal(gc.$groupChats.get().Hydrate.stranded.research, 0, 'omitted empty transcript must not consume the marker')
+})
+
+test('prompt.submit throw strands the member so harvest can still deliver', async () => {
+  const gc = load(() => {
+    throw new Error('gateway timeout')
+  }, { busyUntilResumeCall: { research: 99 } })
+
+  gc.updateGroupChat('AckDrop', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@research go', at: 1, thread: 't1' }]
+    r.watermarks = {}
+    return r
+  })
+  await gc.runGroupChatRounds('AckDrop', [{ name: 'research', title: '' }], 't1')
+
+  const marker = gc.$groupChats.get().AckDrop.stranded?.research
+  assert.ok(marker === 0 || marker?.before === 0, 'submit failure must leave a stranded marker')
+})
+
+test('source contract: group prompt.submit uses the 1:1 1800s ACK budget', () => {
+  assert.match(pluginSource, /const GROUP_PROMPT_SUBMIT_TIMEOUT_MS = 1_800_000/)
+  assert.match(pluginSource, /groupSessionIsBusy/)
+  assert.match(pluginSource, /groupResumeMessageCount/)
+})
+
+test('source contract: busy members are steered or queued, never skipped', () => {
+  assert.match(pluginSource, /function steerOrQueueGroupMember/)
+  assert.match(pluginSource, /function injectGroupDeltaIntoBusyMember/)
+  assert.match(pluginSource, /session\.redirect/)
+  assert.match(pluginSource, /session\.steer/)
+  assert.match(pluginSource, /queued: true/)
+})
+
+test('source contract: long visible turns wrap up instead of silently dying', () => {
   assert.match(pluginSource, /const GROUP_TURN_HARD_CAP_MS = /)
+  assert.match(pluginSource, /GROUP_WRAP_UP_PROMPT/)
+  assert.match(pluginSource, /groupToolsLooping/)
+  assert.match(pluginSource, /owedStranded/)
   assert.match(pluginSource, /deadline = Math\.min\(started \+ GROUP_TURN_HARD_CAP_MS/)
 })
 
 test('source contract: the working line names the member on turn', () => {
-  assert.match(pluginSource, /is thinking…/)
-  assert.match(pluginSource, /r\.turn = member\.name/)
-  assert.match(pluginSource, /r\.turn = null/)
+  assert.match(pluginSource, /Heard you — working/)
+  assert.match(pluginSource, /group-turn-now/)
+  assert.match(pluginSource, /r.turn = member.name/)
+  assert.match(pluginSource, /r.turn = null/)
+})
+
+test('source contract: group rooms render 1:1-style tool/thought/todo chrome', () => {
+  assert.match(pluginSource, /function summarizeGroupToolRun/)
+  assert.match(pluginSource, /function GroupTurnProgressChrome/)
+  assert.match(pluginSource, /function GroupTodoStack/)
+  assert.match(pluginSource, /host\.onEvent\('tool\.start'/)
+  assert.match(pluginSource, /Thought for \$\{thoughtFor\}/)
+  assert.match(pluginSource, /Tasks \$\{done\}\/\$\{list\.length\}/)
 })
 
 test('source contract: creating a group with a taken name mints a fresh room, never reopens the old log', () => {
@@ -1682,8 +2290,65 @@ test('turn prompt: results are full quality — only chatter is asked to stay sh
     viewer: { name: 'research', title: '' },
     deltaLines: []
   })
-  assert.match(prompt, /never thin out real content/i)
-  assert.match(prompt, /Keep chatter short/i)
+  assert.match(prompt, /full 1:1 conclusive answer/i)
+  assert.match(prompt, /tables, numbers, graphs, MEDIA:/i)
+  assert.match(prompt, /spoken ack/i)
+  assert.match(prompt, /MUST post that result/i)
+  assert.match(prompt, /\(pass\)/)
+})
+
+test('extractGroupAssistantReply keeps tables and lifts MEDIA: screenshots', () => {
+  const gc = load(() => '(pass)')
+  const table = '| hop | hip |\n|---|---|\n| 8/8 | 5447 |'
+  const { text, images } = gc.extractGroupAssistantReply([
+    { role: 'user', content: 'status' },
+    { role: 'assistant', content: `${table}\n\nMEDIA:C:/shots/cache.png\n\n252976 is dead.` }
+  ])
+  assert.match(text, /\| hop \| hip \|/)
+  assert.match(text, /!\[cache\.png\]\(hermes-media:\/\/stream\//)
+  assert.equal(images.length, 1)
+  assert.equal(images[0].name, 'cache.png')
+  assert.match(images[0].data, /^hermes-media:\/\/stream\//)
+})
+
+test('extractGroupAssistantReply lifts image_url parts onto the room images list', () => {
+  const gc = load(() => '(pass)')
+  const { text, images } = gc.extractGroupAssistantReply([
+    {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'Smoke frame:' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }
+      ]
+    }
+  ])
+  assert.match(text, /Smoke frame:/)
+  assert.equal(images.length, 1)
+  assert.equal(images[0].data, 'data:image/png;base64,AAAA')
+})
+
+test('extractGroupAssistantReply skips a trailing (pass) and keeps the writeup', () => {
+  const gc = load(() => '(pass)')
+  const writeup = 'HTML 500 was print flush. Studio **97288**. @tester re-POST.'
+  const { text } = gc.extractGroupAssistantReply([
+    { role: 'user', content: 'the turn prompt' },
+    { role: 'assistant', content: writeup },
+    { role: 'user', content: '[IMPORTANT: Background process matched watch pattern "Starting server"]' },
+    { role: 'assistant', content: '(pass)' }
+  ], 1)
+
+  assert.equal(text, writeup)
+})
+
+test('extractGroupAssistantReply does not resurrect an older turn when the new window is only (pass)', () => {
+  const gc = load(() => '(pass)')
+  const { text } = gc.extractGroupAssistantReply([
+    { role: 'assistant', content: 'old writeup from the previous turn' },
+    { role: 'user', content: 'new delta' },
+    { role: 'assistant', content: '(pass)' }
+  ], 1)
+
+  assert.equal(text, '')
 })
 
 test('threads: room composer mints a new thread; replies land in it', async () => {
@@ -1764,10 +2429,15 @@ test('threads: hydration assigns legacy thread ids — lull splits, follow-ups s
 })
 
 test('source contract: thread UI — folded rows, per-thread reply box, new-thread composer', () => {
-  assert.match(pluginSource, /Open this thread/)
-  assert.match(pluginSource, /Collapse thread/)
+  assert.match(pluginSource, /function hideGroupThread\(/)
+  assert.match(pluginSource, /function listGroupThreads\(/)
+  assert.match(pluginSource, /showHiddenThreads \? 'Hidden threads' : 'Threads'/)
+  assert.match(pluginSource, /\$showHiddenThreads/)
+  assert.match(pluginSource, /title: 'Close this thread'/)
+  assert.match(pluginSource, /End this thread/)
+  assert.match(pluginSource, /function endGroupThread\(/)
   assert.match(pluginSource, /Reply in thread…/)
-  assert.match(pluginSource, /children: 'New Thread'/)
+  assert.match(pluginSource, /composingNew \? 'New Thread' : 'Reply'/)
   assert.match(pluginSource, /const markKey = `\$\{thread\}::\$\{memberKey\}`/)
 })
 

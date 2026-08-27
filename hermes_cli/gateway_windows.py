@@ -1,28 +1,15 @@
-"""Windows gateway service backend (Scheduled Task + Startup-folder fallback).
+"""Windows gateway service backend (SCM Windows Service).
 
-This mirrors the contract exposed by ``launchd_install`` / ``launchd_start`` /
-``launchd_status`` etc. on macOS and ``systemd_install`` / ``systemd_start`` on
-Linux. It uses ``schtasks`` under the hood with ``/SC ONLOGON`` and restart-on-
-failure XML settings, and falls back to a ``%APPDATA%\\...\\Startup\\<name>.vbs``
-dropper when Scheduled Task creation is denied (locked-down corporate boxes).
+This mirrors the contract exposed by ``launchd_install`` / ``systemd_install``.
+Boot persistence is a LocalSystem service that ``CreateProcessAsUser``s the
+gateway into the logged-on session. Manual ``start`` / ``--start-now`` still
+use the direct hidden-console spawn so a logged-in user can start without UAC.
 
-Design notes
-------------
-* ``schtasks /Create /SC ONLOGON /RL LIMITED`` means the task runs at the
-  CURRENT USER's next logon without any elevation prompt. Manual starts and
-  install ``--start-now`` use the direct hidden-console launcher instead
-  of ``schtasks /Run`` so start/restart behavior is consistent.
-* We write a shared ``gateway.cmd`` wrapper plus a console-less ``gateway.vbs``
-  launcher. Scheduled Task and Startup-folder persistence both route through
-  VBS/wscript; immediate manual starts route through direct ``subprocess`` spawn.
-* Status = merge of "is the schtasks entry registered?" + "is the startup
-  login item present?" + "is there a gateway process running?" so the status
-  command keeps working regardless of which install path was taken.
-* Quoting is tricky: schtasks parses ``/TR`` itself and cmd.exe parses the
-  generated ``gateway.cmd``. Those are DIFFERENT parsers. We keep two
-  separate quote helpers (same pattern OpenClaw uses) and never cross them.
-* All of this is Windows-only. ``import`` paths are still safe on POSIX but
-  the functions raise if called on non-Windows.
+Hard rule: Hermes must never write or register VBS / wscript / Startup-folder
+droppers. ``hermes update`` refreshes launchers via ``_write_task_script``;
+that path deletes leftover ``.vbs`` files and writes the SCM host + spec
+instead. If service creation needs elevation, prompt UAC — do not fall back
+to VBS.
 """
 
 from __future__ import annotations
@@ -52,11 +39,12 @@ logger = logging.getLogger(__name__)
 # Short timeouts: schtasks occasionally wedges and we don't want to hang forever.
 _SCHTASKS_TIMEOUT_S = 15
 _SCHTASKS_NO_OUTPUT_TIMEOUT_S = 30
-# Patterns in schtasks stderr that mean "fall back to the Startup folder".
+# Patterns in schtasks/sc stderr that mean "need elevation", never VBS.
 _FALLBACK_PATTERNS = re.compile(
     r"(access is denied|acceso denegado|přístup byl odepřen|schtasks timed out|schtasks produced no output)",
     re.IGNORECASE,
 )
+_VBS_FORBIDDEN = "Hermes must never write VBS/wscript autorun launchers"
 _ACCESS_DENIED_PATTERN = re.compile(r"(access is denied|acceso denegado)", re.IGNORECASE)
 
 _TASK_NAME_DEFAULT = "Hermes_Gateway"
@@ -449,129 +437,87 @@ def _quote_vbs_string(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def _build_gateway_vbs_script(
-    python_path: str,
-    working_dir: str,
-    hermes_home: str,
-    profile_arg: str,
-) -> str:
-    """Build a hidden-console ``gateway.vbs`` launcher (CRLF-terminated).
-
-    The Scheduled Task runs this through ``wscript.exe`` instead of ``cmd.exe``.
-
-    Why: issue #45599 root cause #1. Driving the gateway through ``cmd.exe``
-    allocates a console, and during logon Windows broadcasts ``CTRL_CLOSE_EVENT``
-    to console process groups — reaping cmd.exe and the half-initialized gateway
-    with ``STATUS_CONTROL_C_EXIT`` (``0xC000013A``). Task Scheduler treats that
-    code as a user cancel, so the ``RestartOnFailure`` policy never fires and the
-    gateway silently disappears on every reboot.
-
-    ``wscript.exe`` is a GUI-subsystem executable with no console, so this
-    launcher receives no console control events. It ``Run``s the console
-    ``python.exe`` with window style 0 (hidden): the gateway owns a single
-    hidden console — never shown, never CTRL_CLOSE'd at logon, and inherited
-    by every console-subsystem descendant (git, gh, node, …) so none of them
-    allocate a visible flashing conhost (#54220/#56747; the previous
-    console-less pythonw.exe gateway forced exactly that per-descendant
-    flash). No cmd.exe anywhere in the chain. Mirrors
-    ``_build_gateway_cmd_script`` (same env + argv via
-    ``_resolve_detached_python``).
-    """
-    python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
-
-    prog_args = [python_exe_path, "-m", "hermes_cli.main"]
-    if profile_arg:
-        prog_args.extend(profile_arg.split())
-    prog_args.extend(["gateway", "run"])
-    # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
-    command_line = subprocess.list2cmdline(prog_args)
-
-    repo_root = _preserve_hermes_home_path(Path(__file__).resolve().parent.parent)
-    static_pythonpath = os.pathsep.join(
-        [repo_root, *[_preserve_hermes_home_path(entry) for entry in extra_pythonpath]]
-    )
-
-    lines = [
-        f"' {_TASK_DESCRIPTION}",
-        "Option Explicit",
-        "Dim sh, env, existing_pp",
-        'Set sh = CreateObject("WScript.Shell")',
-        'Set env = sh.Environment("PROCESS")',
-        f"env.Item({_quote_vbs_string('HERMES_HOME')}) = {_quote_vbs_string(hermes_home)}",
-        f"env.Item({_quote_vbs_string('PYTHONIOENCODING')}) = {_quote_vbs_string('utf-8')}",
-        f"env.Item({_quote_vbs_string('HERMES_GATEWAY_DETACHED')}) = {_quote_vbs_string('1')}",
-        f"env.Item({_quote_vbs_string('VIRTUAL_ENV')}) = {_quote_vbs_string(_preserve_hermes_home_path(venv_dir))}",
-        # Mirror the cmd wrapper's ``PYTHONPATH=<static>;%PYTHONPATH%``: chain onto
-        # whatever PYTHONPATH the task environment already carries, at runtime.
-        f"existing_pp = env.Item({_quote_vbs_string('PYTHONPATH')})",
-        "If Len(existing_pp) > 0 Then",
-        f"  env.Item({_quote_vbs_string('PYTHONPATH')}) = {_quote_vbs_string(static_pythonpath + os.pathsep)} & existing_pp",
-        "Else",
-        f"  env.Item({_quote_vbs_string('PYTHONPATH')}) = {_quote_vbs_string(static_pythonpath)}",
-        "End If",
-        f"sh.CurrentDirectory = {_quote_vbs_string(working_dir)}",
-        # Window style 0 = hidden; bWaitOnReturn False = detached/async. The
-        # console python's one console is created hidden and inherited by all
-        # descendants, so nothing ever flashes.
-        f"sh.Run {_quote_vbs_string(command_line)}, 0, False",
-    ]
-    return "\r\n".join(lines) + "\r\n"
+def _build_gateway_vbs_script(*_args, **_kwargs) -> str:
+    """Banned. Persistence is the Windows SCM service, never VBS."""
+    raise RuntimeError(_VBS_FORBIDDEN)
 
 
-def _build_startup_launcher(script_path: Path) -> str:
-    """The tiny .vbs that goes in the Startup folder and chains hidden.
+def _build_startup_launcher(*_args, **_kwargs) -> str:
+    """Banned. Persistence is the Windows SCM service, never VBS."""
+    raise RuntimeError(_VBS_FORBIDDEN)
 
-    Defense-in-depth: bail out silently if the target script is gone. Test
-    fixtures historically wrote Startup entries pointing at pytest tmp_path
-    directories that vanish after the test session. Without the existence
-    guard, every subsequent Windows login could attempt a stale launcher. The
-    check + ``WScript.Quit 0`` keeps that case silent.
-    """
-    target = str(script_path.with_suffix(".vbs"))
-    command = subprocess.list2cmdline(["wscript.exe", target])
-    lines = [
-        f"' {_TASK_DESCRIPTION}",
-        "Option Explicit",
-        "Dim fso, sh, target",
-        f"target = {_quote_vbs_string(target)}",
-        'Set fso = CreateObject("Scripting.FileSystemObject")',
-        "If Not fso.FileExists(target) Then WScript.Quit 0",
-        'Set sh = CreateObject("WScript.Shell")',
-        f"sh.Run {_quote_vbs_string(command)}, 0, False",
-    ]
-    return "\r\n".join(lines) + "\r\n"
+
+def get_scm_host_path() -> Path:
+    """Generated SCM trampoline: ``gateway-service/<task>_svc.py``."""
+    script = get_task_script_path()
+    return script.with_name(f"{script.stem}_svc.py")
+
+
+def get_scm_spec_path() -> Path:
+    """Generated SCM spec: ``gateway-service/<task>.scm.json``."""
+    script = get_task_script_path()
+    return script.with_name(f"{script.stem}.scm.json")
+
+
+def _unlink_if_exists(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _strip_vbs_autorun_files(script_path: Path | None = None) -> None:
+    """Delete leftover Hermes VBS launchers. Never recreate them."""
+    script = script_path or get_task_script_path()
+    _unlink_if_exists(script.with_suffix(".vbs"))
+    _unlink_if_exists(get_startup_entry_path())
+    _unlink_if_exists(_legacy_startup_entry_path())
 
 
 def _write_task_script() -> Path:
-    """Generate and write the gateway.cmd wrapper. Return its absolute path."""
+    """Write gateway.cmd + SCM host/spec. Never write VBS. Return .cmd path."""
     _assert_windows()
-    # Local imports to avoid circular-init at module load time.
     from hermes_cli.config import get_hermes_home
     from hermes_cli.gateway import (
         PROJECT_ROOT,
         _profile_arg,
         get_python_path,
     )
+    from hermes_cli.windows_gateway_svc import dump_spec, render_scm_host
 
     python_path = _preserve_hermes_home_path(get_python_path())
     working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
     hermes_home = str(Path(get_hermes_home()))
     profile_arg = _profile_arg(hermes_home)
+    repo_root = _preserve_hermes_home_path(Path(__file__).resolve().parent.parent)
 
     content = _build_gateway_cmd_script(python_path, working_dir, hermes_home, profile_arg)
     script_path = get_task_script_path()
+    script_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = script_path.with_suffix(".tmp")
     tmp.write_text(content, encoding="utf-8", newline="")
     tmp.replace(script_path)
 
-    # Also render the console-less .vbs launcher used by Scheduled Task and the
-    # Startup-folder fallback via wscript.exe (issue #45599 fix A). The .cmd
-    # wrapper stays as a generated helper/compatibility artifact.
-    vbs_content = _build_gateway_vbs_script(python_path, working_dir, hermes_home, profile_arg)
-    vbs_path = script_path.with_suffix(".vbs")
-    vbs_tmp = vbs_path.with_name(vbs_path.name + ".tmp")
-    vbs_tmp.write_text(vbs_content, encoding="utf-8", newline="")
-    vbs_tmp.replace(vbs_path)
+    argv, cwd, env_overlay = _build_gateway_argv()
+    spec = {
+        "service_name": get_task_name(),
+        "display_name": f"{_TASK_DESCRIPTION} ({get_task_name()})",
+        "description": _TASK_DESCRIPTION,
+        "argv": argv,
+        "cwd": cwd,
+        "env": env_overlay,
+        "hermes_home": hermes_home,
+        "profile_arg": profile_arg,
+    }
+    dump_spec(get_scm_spec_path(), spec)
+
+    host_path = get_scm_host_path()
+    host_tmp = host_path.with_suffix(".tmp")
+    host_tmp.write_text(render_scm_host(repo_root), encoding="utf-8", newline="\n")
+    host_tmp.replace(host_path)
+
+    _strip_vbs_autorun_files(script_path)
     return script_path
 
 
@@ -593,11 +539,15 @@ def _resolve_task_user() -> str | None:
 def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | None) -> str:
     """Render a Task Scheduler XML definition with safe long-running defaults.
 
-    ``launcher_path`` is the console-less ``.vbs`` the task runs via
-    ``wscript.exe`` — not the ``.cmd`` (see ``_build_gateway_vbs_script`` /
-    issue #45599 root cause #1).
+    ``launcher_path`` is the generated ``*_svc.py`` SCM host (or a .cmd whose
+    sibling host is used). Never wscript / VBS.
     """
     user_principal = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
+    host = launcher_path
+    if host.suffix.lower() in {".vbs", ".cmd"}:
+        host = host.with_name(f"{host.stem}_svc.py")
+    python_cmd = escape(str(Path(sys.executable)))
+    host_arg = escape(str(host))
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -640,8 +590,8 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>wscript.exe</Command>
-      <Arguments>//B //Nologo "{escape(str(launcher_path))}"</Arguments>
+      <Command>{python_cmd}</Command>
+      <Arguments>"{host_arg}"</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -703,18 +653,17 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
 
 
 def _install_startup_entry(script_path: Path) -> Path:
-    """Write the Startup-folder fallback launcher. Returns its path."""
+    """Strip leftover Startup-folder VBS. Never write one.
+
+    Persistence is the Windows Service created by ``install()``.
+    """
     entry = get_startup_entry_path()
-    entry.parent.mkdir(parents=True, exist_ok=True)
-    tmp = entry.with_suffix(".tmp")
-    tmp.write_text(_build_startup_launcher(script_path), encoding="utf-8", newline="")
-    tmp.replace(entry)
-    legacy_entry = _legacy_startup_entry_path()
-    try:
-        if legacy_entry.exists():
-            legacy_entry.unlink()
-    except OSError:
-        pass
+    for path in (entry, _legacy_startup_entry_path()):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
     return entry
 
 
@@ -1022,31 +971,103 @@ def _prompt_install_choices(
     return start_now, start_on_login
 
 
+
+def _exec_sc(args: list[str]) -> tuple[int, str, str]:
+    """Run sc.exe. Return (code, stdout, stderr)."""
+    _assert_windows()
+    sc = shutil.which("sc") or shutil.which("sc.exe")
+    if sc is None:
+        return (1, "", "sc.exe not found on PATH")
+    try:
+        proc = subprocess.run(
+            [sc, *args],
+            capture_output=True,
+            text=True,
+            encoding=_schtasks_encoding(),
+            errors="replace",
+            timeout=_SCHTASKS_TIMEOUT_S,
+            creationflags=windows_hide_flags(),
+        )
+        return (proc.returncode, proc.stdout or "", proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return (124, "", "sc.exe timed out")
+
+
+def is_service_registered() -> bool:
+    """True when the Windows SCM service for this profile exists."""
+    code, out, err = _exec_sc(["query", get_task_name()])
+    blob = f"{out}\n{err}".lower()
+    if "specified service does not exist" in blob:
+        return False
+    return code == 0
+
+
+def query_service_status() -> dict[str, str]:
+    """Parse sc query STATE / WIN32_EXIT_CODE."""
+    code, out, _err = _exec_sc(["query", get_task_name()])
+    if code != 0:
+        return {}
+    info: dict[str, str] = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        info[key.strip().lower()] = value.strip()
+    return info
+
+
+def _install_windows_service() -> tuple[bool, str]:
+    """Create or recreate the LocalSystem delayed-auto service."""
+    from hermes_cli.gateway import get_python_path
+
+    name = get_task_name()
+    host = get_scm_host_path()
+    python_exe, _venv, _extra = _resolve_detached_python(
+        _preserve_hermes_home_path(get_python_path())
+    )
+    if not host.is_file():
+        return (False, f"missing SCM host: {host}")
+    bin_path = f'"{python_exe}" "{host}"'
+    _exec_sc(["stop", name])
+    _exec_sc(["delete", name])
+    create = _exec_sc([
+        "create", name,
+        "binPath=", bin_path,
+        "start=", "delayed-auto",
+        "DisplayName=", f"{_TASK_DESCRIPTION} ({name})",
+    ])
+    if create[0] != 0:
+        return (False, f"sc create failed (code {create[0]}): {(create[2] or create[1]).strip()}")
+    _exec_sc(["description", name, _TASK_DESCRIPTION])
+    _exec_sc([
+        "failure", name,
+        "reset=", "86400",
+        "actions=", "restart/60000/restart/60000/restart/60000",
+    ])
+    return (True, f"Windows service registered: {name}")
+
+
+def _uninstall_windows_service() -> tuple[bool, str]:
+    name = get_task_name()
+    if not is_service_registered():
+        return (True, f"Windows service not registered: {name}")
+    _exec_sc(["stop", name])
+    code, out, err = _exec_sc(["delete", name])
+    if code == 0:
+        return (True, f"Removed Windows service {name}")
+    detail = (err or out).strip()
+    return (False, f"sc delete failed (code {code}): {detail}")
+
+
+
 def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -> None:
-    """Install the Startup-folder fallback and optionally start once."""
-    print(f"↻ Scheduled Task install blocked ({detail.splitlines()[0]}) — using Startup folder fallback")
-    entry = _install_startup_entry(script_path)
-    print(f"✓ Installed Windows login item: {entry}")
-    print(f"  Task script: {script_path}")
-
-    # Re-running `hermes -p <profile> gateway install` must be safe.
-    # Startup-folder fallback only installs login persistence. Starting is
-    # controlled by the pre-UAC start_now answer so all user decisions happen
-    # before any elevation prompt.
-    from hermes_cli.gateway import find_gateway_pids, _profile_arg
-
-    running_pids = list(find_gateway_pids())
-    if running_pids:
-        print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
-    elif start_now:
-        pid = _spawn_detached()
-        _report_gateway_start(f"direct spawn (PID {pid})")
-    else:
-        profile_arg = _profile_arg()
-        start_cmd = f"hermes {profile_arg} gateway start" if profile_arg else "hermes gateway start"
-        print("ℹ Startup fallback installed; gateway not started now.")
-        print(f"  Start manually with: {start_cmd}")
-    _print_next_steps()
+    """Banned. VBS / Startup-folder persistence is never an install success."""
+    _strip_vbs_autorun_files(script_path)
+    raise RuntimeError(
+        f"{_VBS_FORBIDDEN}. Service install blocked ({detail}). "
+        "Approve UAC and rerun: hermes gateway install"
+    )
 
 
 def install(
@@ -1056,14 +1077,11 @@ def install(
     start_on_login: bool | None = None,
     elevated_handoff: bool = False,
 ) -> None:
-    """Install the gateway as a Windows Scheduled Task (with Startup fallback).
-
-    Idempotent: re-running updates the task to point at the current python/
-    project paths. ``force`` is accepted for API parity with ``launchd_install``
-    / ``systemd_install`` but isn't needed — we always reconcile.
-    """
+    """Install the gateway as a Windows Service. Never writes VBS."""
     _assert_windows()
     start_now, start_on_login = _prompt_install_choices(start_now, start_on_login)
+    script_path = _write_task_script()
+    _strip_vbs_autorun_files(script_path)
 
     if not start_on_login:
         print("ℹ Skipped Windows login auto-start install.")
@@ -1079,19 +1097,12 @@ def install(
             print("  Run later with: hermes gateway start")
         return
 
-    task_name = get_task_name()
-    script_path = _write_task_script()
-
-    # On machines where the current user's scheduled-task ACL is locked down,
-    # schtasks /Create or /Change can sit for the timeout before returning
-    # Access Denied. We already collected all intent questions above, so avoid
-    # a mysterious post-question pause: ask for UAC before touching schtasks.
     if not _is_running_as_admin() and not elevated_handoff:
         from hermes_cli.setup import prompt_yes_no
 
-        print("↻ Scheduled Task install may need administrator approval on this Windows account.")
-        print("  UAC is Windows' admin approval prompt; it is needed to create/update the Scheduled Task.")
-        if prompt_yes_no("  Open the UAC prompt now?", False):
+        print("↻ Windows Service install needs administrator approval.")
+        print("  UAC is required to create/update the service. VBS/Startup fallback is forbidden.")
+        if prompt_yes_no("  Open the UAC prompt now?", True):
             if _launch_elevated_install(force=force, start_now=start_now, start_on_login=start_on_login):
                 print("✓ Launched elevated Hermes gateway install prompt.")
                 if start_now:
@@ -1099,17 +1110,16 @@ def install(
                 else:
                     print("  Approve the Windows UAC prompt, then run: hermes gateway status")
                 return
-            print("⚠ Falling back to Startup folder because elevation was unavailable or cancelled.")
-        else:
-            print("  Skipped elevation. Falling back to Startup folder.")
-        _install_startup_fallback(script_path, start_now, "administrator approval was not used")
-        return
+        raise RuntimeError(
+            f"{_VBS_FORBIDDEN}. Cannot install the Windows Service without administrator approval."
+        )
 
-    ok, detail = _install_scheduled_task(task_name, script_path)
+    ok, detail = _install_windows_service()
     if ok:
         print(f"✓ {detail}")
-        print(f"  Task script: {script_path}")
-        print("ℹ Gateway auto-start installed for Windows login.")
+        print(f"  SCM host: {get_scm_host_path()}")
+        print(f"  SCM spec: {get_scm_spec_path()}")
+        print("ℹ Gateway auto-start installed as a Windows Service (delayed-auto).")
         if start_now:
             running_pids = _gateway_pids()
             if running_pids:
@@ -1123,56 +1133,15 @@ def install(
         _print_next_steps()
         return
 
-    # schtasks create didn't work. Prefer a real Scheduled Task over the
-    # Startup-folder fallback when the only blocker is elevation. This gives
-    # users a UAC prompt instead of silently installing a less reliable login
-    # item, and keeps the fallback for locked-down boxes / cancelled prompts.
     if _is_access_denied(detail) and not _is_running_as_admin():
         from hermes_cli.setup import prompt_yes_no
 
-        print(f"↻ Scheduled Task install needs administrator approval ({detail.splitlines()[0]})")
-        print("  UAC is Windows' admin approval prompt; it is needed to create/update the Scheduled Task.")
-        if prompt_yes_no("  Open the UAC prompt now?", False):
+        print(f"↻ Windows Service install needs administrator approval ({detail.splitlines()[0]})")
+        if prompt_yes_no("  Open the UAC prompt now?", True):
             if _launch_elevated_install(force=force, start_now=start_now, start_on_login=start_on_login):
                 print("✓ Launched elevated Hermes gateway install prompt.")
-                if start_now:
-                    print("  Approve the Windows UAC prompt; the elevated install will start the gateway afterwards.")
-                else:
-                    print("  Approve the Windows UAC prompt, then run: hermes gateway status")
                 return
-            print("⚠ Falling back to Startup folder because elevation was unavailable or cancelled.")
-        else:
-            print("  Skipped elevation. Falling back to Startup folder.")
-
-    # schtasks create didn't work. See if it's a "fall back to startup" case.
-    if _should_fall_back(1, detail):
-        print(f"↻ Scheduled Task install blocked ({detail.splitlines()[0]}) — using Startup folder fallback")
-        entry = _install_startup_entry(script_path)
-        print(f"✓ Installed Windows login item: {entry}")
-        print(f"  Task script: {script_path}")
-
-        # Re-running `hermes -p <profile> gateway install` must be safe.
-        # Startup-folder fallback only installs login persistence. Starting is
-        # controlled by the pre-UAC start_now answer so all user decisions happen
-        # before any elevation prompt.
-        from hermes_cli.gateway import find_gateway_pids, _profile_arg
-
-        running_pids = list(find_gateway_pids())
-        if running_pids:
-            print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
-        elif start_now:
-            pid = _spawn_detached()
-            _report_gateway_start(f"direct spawn (PID {pid})")
-        else:
-            profile_arg = _profile_arg()
-            start_cmd = f"hermes {profile_arg} gateway start" if profile_arg else "hermes gateway start"
-            print("ℹ Startup fallback installed; gateway not started now.")
-            print(f"  Start manually with: {start_cmd}")
-        _print_next_steps()
-        return
-
-    # Unknown schtasks error — surface it and bail.
-    raise RuntimeError(f"Windows gateway install failed: {detail}")
+    raise RuntimeError(f"Windows gateway service install failed: {detail}")
 
 
 def _wait_for_gateway_ready(timeout_s: float = 6.0, interval_s: float = 0.4) -> list[int]:
@@ -1215,42 +1184,39 @@ def _print_next_steps() -> None:
 
 
 def uninstall() -> None:
-    """Remove both the Scheduled Task and the Startup-folder fallback, if present."""
+    """Remove the Windows Service, leftover tasks, and any VBS droppers."""
     _assert_windows()
     task_name = get_task_name()
     script_path = get_task_script_path()
-    vbs_script_path = script_path.with_suffix(".vbs")
-    startup_entry = get_startup_entry_path()
-    legacy_startup_entry = _legacy_startup_entry_path()
 
-    scheduled_task_removed = False
+    svc_ok, svc_detail = _uninstall_windows_service()
+    if svc_ok:
+        if "not registered" not in svc_detail:
+            print(f"✓ {svc_detail}")
+    elif _is_access_denied(svc_detail) and not _is_running_as_admin():
+        from hermes_cli.setup import prompt_yes_no
+
+        print(f"↻ Windows Service uninstall needs administrator approval ({svc_detail})")
+        if prompt_yes_no("  Open the UAC prompt now?", True):
+            if _launch_elevated_uninstall():
+                print("✓ Launched elevated Hermes gateway uninstall prompt.")
+                return
+        print("⚠ Windows Service was not removed.")
+    else:
+        print(f"⚠ {svc_detail}")
+
     if is_task_registered():
         code, _out, err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
-        detail = err.strip()
         if code == 0:
-            scheduled_task_removed = True
-            print(f"✓ Removed Scheduled Task {task_name!r}")
-        elif _is_access_denied(detail) and not _is_running_as_admin():
-            from hermes_cli.setup import prompt_yes_no
-
-            print(f"↻ Scheduled Task uninstall needs administrator approval ({detail or 'access denied'})")
-            print("  UAC is Windows' admin approval prompt; it is needed to remove the Scheduled Task.")
-            if prompt_yes_no("  Open the UAC prompt now?", False):
-                if _launch_elevated_uninstall():
-                    print("✓ Launched elevated Hermes gateway uninstall prompt.")
-                    print("  Approve the Windows UAC prompt, then run: hermes gateway status")
-                    return
-                print("⚠ Elevated uninstall prompt was unavailable or cancelled.")
-            else:
-                print("  Skipped elevation. Scheduled Task was not removed.")
+            print(f"✓ Removed leftover Scheduled Task {task_name!r}")
         else:
-            print(f"⚠ schtasks /Delete returned code {code}: {detail}")
+            print(f"⚠ schtasks /Delete returned code {code}: {err.strip()}")
 
+    _strip_vbs_autorun_files(script_path)
     for path, label in [
-        (startup_entry, "Windows login item"),
-        (legacy_startup_entry, "legacy Windows login item"),
         (script_path, "Task script"),
-        (vbs_script_path, "Task launcher"),
+        (get_scm_host_path(), "SCM host"),
+        (get_scm_spec_path(), "SCM spec"),
     ]:
         try:
             path.unlink()
@@ -1258,7 +1224,9 @@ def uninstall() -> None:
         except FileNotFoundError:
             pass
 
-    if is_task_registered() and not scheduled_task_removed:
+    if is_service_registered():
+        print(f"⚠ Windows Service still registered: {task_name}")
+    if is_task_registered():
         print(f"⚠ Scheduled Task still registered: {task_name}")
 
 
@@ -1276,8 +1244,8 @@ def is_startup_entry_installed() -> bool:
 
 
 def is_installed() -> bool:
-    """True when either the schtasks entry or the Startup fallback is present."""
-    return is_task_registered() or is_startup_entry_installed()
+    """True when the Windows Service is registered."""
+    return is_service_registered()
 
 
 def query_task_status() -> dict[str, str]:
@@ -1446,24 +1414,30 @@ def status(deep: bool = False) -> None:
     """Print a status report for the Windows gateway service."""
     _assert_windows()
     task_name = get_task_name()
-    task_installed = is_task_registered()
-    startup_installed = is_startup_entry_installed()
+    svc_installed = is_service_registered()
+    leftover_vbs = is_startup_entry_installed()
+    leftover_task = is_task_registered()
     pids = _gateway_pids()
 
-    if task_installed:
-        print(f"✓ Scheduled Task registered: {task_name}")
-        info = query_task_status()
-        if info:
-            for key in ("status", "last run time", "last run result"):
-                if key in info:
-                    print(f"  {key.title()}: {info[key]}")
-    elif startup_installed:
-        entry = get_startup_entry_path()
-        if not entry.exists():
-            entry = _legacy_startup_entry_path()
-        print(f"✓ Windows login item installed: {entry}")
+    if leftover_vbs:
+        print("✗ Leftover VBS/Startup login item present — deleting")
+        _strip_vbs_autorun_files()
+
+    if svc_installed:
+        print(f"✓ Windows Service registered: {task_name}")
+        info = query_service_status()
+        state = ""
+        for key, value in info.items():
+            if key.startswith("state"):
+                state = value
+                break
+        if state:
+            print(f"  State: {state}")
     else:
-        print("✗ Gateway service not installed")
+        print("✗ Gateway Windows Service not installed")
+
+    if leftover_task:
+        print(f"⚠ Leftover Scheduled Task still registered: {task_name}")
 
     if pids:
         print(f"✓ Gateway process running (PID: {', '.join(map(str, pids))})")
@@ -1472,14 +1446,13 @@ def status(deep: bool = False) -> None:
 
     if deep:
         print()
-        print(f"  Task name:        {task_name}")
+        print(f"  Service name:     {task_name}")
+        print(f"  SCM host:         {get_scm_host_path()}")
+        print(f"  SCM spec:         {get_scm_spec_path()}")
         print(f"  Task script:      {get_task_script_path()}")
-        print(f"  Startup entry:    {get_startup_entry_path()}")
-        # Surface the per-probe truth so the user can see *which* signal
-        # is lying when the high-level summary disagrees with reality.
         _print_deep_probes()
 
-    if not task_installed and not startup_installed and not pids:
+    if not svc_installed and not pids:
         print()
         print("To install:")
         print("  hermes gateway install")
@@ -1493,10 +1466,10 @@ def start() -> None:
         print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
         return
 
-    task_installed = is_task_registered()
-    startup_installed = is_startup_entry_installed()
+    task_installed = is_service_registered()
+    startup_installed = False
 
-    if not task_installed and not startup_installed:
+    if not task_installed:
         from hermes_cli.setup import prompt_yes_no
 
         print("✗ Gateway service is not installed")
@@ -1504,9 +1477,8 @@ def start() -> None:
             print("  Run: hermes gateway install")
             return
         install(force=False)
-        task_installed = is_task_registered()
-        startup_installed = is_startup_entry_installed()
-        if not task_installed and not startup_installed:
+        task_installed = is_service_registered()
+        if not task_installed:
             print("⚠ Gateway install did not complete in this process.")
             print("  If a UAC prompt opened, approve it, then run: hermes gateway start")
             return

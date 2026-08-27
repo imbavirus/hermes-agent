@@ -494,7 +494,7 @@ function groupActivityLabel(event) {
   const kind = event?.kind
   const base = GROUP_ACTIVITY_LABELS[kind] || kind || 'did something'
 
-  if (kind === 'cancelled' || kind === 'settled' || kind === 'capped') {
+  if (kind === 'cancelled' || kind === 'settled' || kind === 'capped' || kind === 'ended') {
     return base
   }
 
@@ -513,9 +513,11 @@ const GROUP_ACTIVITY_LABELS = {
   cancelled: 'turn interrupted by a newer message',
   settled: 'turn settled',
   capped: 'turn stopped at the round/message cap',
+  ended: 'thread ended',
   delivered: 'delivered a late reply',
   held: 'is held (stopped by you) — @mention it or say resume to release',
-  stopped: 'stopped the room — remaining turns are held until resumed'
+  stopped: 'stopped the room — remaining turns are held until resumed',
+  steered: 'picked up a mid-turn update'
 }
 
 const GROUP_ACTIVITY_GLYPHS = {
@@ -528,9 +530,11 @@ const GROUP_ACTIVITY_GLYPHS = {
   cancelled: 'close',
   settled: 'check-all',
   capped: 'debug-step-over',
+  ended: 'debug-stop',
   delivered: 'mail-read',
   held: 'debug-pause',
-  stopped: 'debug-stop'
+  stopped: 'debug-stop',
+  steered: 'debug-step-over'
 }
 
 /** Text tone for an activity row: quiet for pass/cancel/settle, accent for
@@ -2196,6 +2200,12 @@ async function migrateBotMeta(storage = pluginCtx?.storage) {
 /** Session-only view toggle: reveal hidden bots (dimmed) in the roster. */
 const $showHiddenBots = atom(false)
 
+/** Session-only: Threads list shows hidden threads instead of the live list. */
+const $showHiddenThreads = atom(false)
+
+/** Hidden flag for a roster row. Thin remote-source rows never read local
+ *  meta (botRosterMeta returns null for them), so hide is by NAME on the
+ *  active source; remote rows of the same name stay visible. */
 function isBotHidden(bot, metaByName) {
   return Boolean(botRosterMeta(bot, metaByName)?.hidden)
 }
@@ -5413,7 +5423,34 @@ function botBackendProfileScope(route, fallbackProfile = 'default') {
 
 /** Gateway RPC on the bot's OWN source. Source-scoped rows always use the
  * explicit descriptor, including a registered local source. */
-async function requestForBot(bot, method, params = {}) {
+
+// 1:1 chat already uses PROMPT_SUBMIT_REQUEST_TIMEOUT_MS (1800s) because
+// the ACK is not the turn — a cold profile agent build + first token
+// routinely exceeds host.request's 30s default. Group turns used the
+// default, so a still-running member was recorded as failed/timed-out
+// and never harvested (no stranded marker on the throw).
+const GROUP_PROMPT_SUBMIT_TIMEOUT_MS = 1_800_000
+const GROUP_SESSION_RPC_TIMEOUT_MS = 90_000
+
+function groupRpcTimeoutMs(method) {
+  if (method === 'prompt.submit') {
+    return GROUP_PROMPT_SUBMIT_TIMEOUT_MS
+  }
+
+  if (
+    method === 'session.create' ||
+    method === 'session.resume' ||
+    method === 'session.redirect' ||
+    method === 'session.steer'
+  ) {
+    return GROUP_SESSION_RPC_TIMEOUT_MS
+  }
+
+  return null
+}
+
+/** Gateway RPC on the bot's OWN source: requestProfile for remote rows,
+ *  the active gateway for local ones. Never activates/foregrounds. */async function requestForBot(bot, method, params = {}) {
   const route = botConnectionRoute(bot)
 
   if (route) {
@@ -5431,7 +5468,12 @@ async function requestForBot(bot, method, params = {}) {
     }
   }
 
+  const timeout = groupRpcTimeoutMs(method)
+  const gateway = typeof host.getGateway === 'function' ? host.getGateway() : null
   try {
+    if (timeout != null && gateway && typeof gateway.request === 'function') {
+      return await gateway.request(method, params, timeout)
+    }
     return await host.request(method, params)
   } catch (error) {
     throw asRpcError(error, `Gateway request ${method} failed`)
@@ -5469,8 +5511,7 @@ function asRpcError(value, fallback) {
     return error
   }
 
-  return new Error(value == null || value === '' ? fallback : String(value))
-}
+  return new Error(value == null || value === '' ? fallback : String(value))}
 
 /** Stable per-member identity inside a group room. Local members keep their
  *  bare name (compat with rooms persisted before cross-connection groups);
@@ -5570,6 +5611,419 @@ function aliasIdentityFor(bot) {
   const entry = aliasRouteIndex.get(`${connectionId}::${target}`) || null
 
   return entry && entry.name !== String(bot?.name || '').trim() ? entry : null
+}
+
+// ── group turn progress (1:1-style chrome) ──────────────────────────────────
+// Room members used to only show "is thinking…". 1:1 chat already surfaces
+// "Explored 3 files, used 2 tools", "Thought for 12s", and the Tasks N/M
+// stack. We mirror that from tool.start/complete events + resume snapshots
+// so a group turn is never a black box.
+const $groupTurnProgress = atom({})
+const groupRuntimeIndex = new Map()
+
+function groupProgressKey(group, member) {
+  return `${group}::${groupMemberKey(member)}`
+}
+
+function rememberGroupRuntime(group, member, runtimeSid) {
+  if (!runtimeSid) {
+    return
+  }
+
+  groupRuntimeIndex.set(String(runtimeSid), { group, member, memberKey: groupMemberKey(member) })
+}
+
+const GROUP_EXPLORE_TOOLS = new Set([
+  'list_files',
+  'read_file',
+  'search_files',
+  'session_search',
+  'session_search_recall',
+  'viking_search',
+  'viking_read',
+  'vision_analyze',
+  'web_extract',
+  'web_search',
+  'hermes_web_search'
+])
+
+function groupToolCategory(name) {
+  const tool = String(name || '')
+
+  if (tool === 'write_file' || tool === 'patch' || tool === 'skill_manage') {
+    return 'edit'
+  }
+
+  if (tool === 'terminal' || tool === 'execute_code') {
+    return 'run'
+  }
+
+  if (tool === 'delegate_task') {
+    return 'delegate'
+  }
+
+  if (GROUP_EXPLORE_TOOLS.has(tool) || tool.startsWith('browser_')) {
+    return 'explore'
+  }
+
+  return 'other'
+}
+
+function groupToolTarget(tool) {
+  const args = tool?.args && typeof tool.args === 'object' ? tool.args : {}
+  const command = args.command
+
+  if (command) {
+    return String(command).slice(0, 64)
+  }
+
+  const path = args.path || args.file || args.filepath || args.url || args.query || ''
+  const text = String(path)
+
+  if (!text) {
+    return ''
+  }
+
+  const slash = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+
+  return (slash >= 0 ? text.slice(slash + 1) : text).slice(0, 48)
+}
+
+function summarizeGroupToolRun(tools, live) {
+  const list = Array.isArray(tools) ? tools.filter(t => t?.name && t.name !== 'todo') : []
+
+  if (!list.length) {
+    return live ? 'is thinking…' : ''
+  }
+
+  const copy = {
+    delegate: { noun: ['task', 'tasks'], past: 'Delegated', present: 'Delegating' },
+    edit: { noun: ['file', 'files'], past: 'Edited', present: 'Editing' },
+    explore: { noun: ['file', 'files'], past: 'Explored', present: 'Exploring' },
+    other: { noun: ['tool', 'tools'], past: 'Used', present: 'Using' },
+    run: { noun: ['command', 'commands'], past: 'Ran', present: 'Running' }
+  }
+  const order = ['edit', 'explore', 'run', 'delegate', 'other']
+  const pending = live ? list.find(t => t.pending) || list[list.length - 1] : null
+  const liveCat = pending ? groupToolCategory(pending.name) : null
+  const byCat = new Map()
+
+  for (const tool of list) {
+    const cat = groupToolCategory(tool.name)
+    const bucket = byCat.get(cat) || []
+    bucket.push(tool)
+    byCat.set(cat, bucket)
+  }
+
+  const clauses = order.flatMap(cat => {
+    const group = byCat.get(cat)
+
+    if (!group) {
+      return []
+    }
+
+    const meta = copy[cat]
+    const verb = cat === liveCat ? meta.present : meta.past
+    const target = group.length === 1 ? groupToolTarget(group[0]) : ''
+
+    if (target && (cat === liveCat || cat !== 'run')) {
+      return [`${verb} ${target}`]
+    }
+
+    return [`${verb} ${group.length} ${meta.noun[group.length === 1 ? 0 : 1]}`]
+  })
+
+  return clauses.map((text, i) => (i === 0 ? text : text.charAt(0).toLowerCase() + text.slice(1))).join(', ')
+}
+
+function groupToolStepLine(tool, pending) {
+  if (!tool?.name || tool.name === 'todo') {
+    return ''
+  }
+
+  const cat = groupToolCategory(tool.name)
+  const verbs = {
+    delegate: pending ? 'Delegating' : 'Delegated',
+    edit: pending ? 'Editing' : 'Edited',
+    explore: pending ? 'Exploring' : 'Explored',
+    other: pending ? 'Using' : 'Used',
+    run: pending ? 'Running' : 'Ran'
+  }
+  const target = groupToolTarget(tool)
+
+  return target ? `${verbs[cat] || verbs.other} ${target}` : `${verbs[cat] || verbs.other} ${tool.name}`
+}
+
+function groupSpokenSnippet(text) {
+  const trimmed = String(text || '').replace(/\s+/g, ' ').trim()
+
+  if (!trimmed || /^\(?\s*pass\s*\)?\.?$/i.test(trimmed)) {
+    return ''
+  }
+
+  const sentence = trimmed.split(/(?<=[.!?])\s+/)[0] || trimmed
+
+  return sentence.slice(0, 180)
+}
+
+function groupProgressNow(progress) {
+  const tools = Array.isArray(progress?.tools) ? progress.tools.filter(t => t?.name && t.name !== 'todo') : []
+  const pending = tools.find(t => t.pending) || tools[tools.length - 1]
+  const fromTool = pending ? groupToolStepLine(pending, Boolean(pending.pending)) : ''
+
+  if (fromTool) {
+    return fromTool
+  }
+
+  const spoken = groupSpokenSnippet(progress?.thinkingText)
+
+  if (spoken) {
+    return spoken
+  }
+
+  if (progress?.now) {
+    return String(progress.now)
+  }
+
+  return progress?.busy || progress?.thinkingPending ? 'Heard you — working.' : ''
+}
+
+function groupToolsLooping(tools) {
+  const recent = (Array.isArray(tools) ? tools : []).filter(t => t?.name && t.name !== 'todo')
+
+  if (recent.length < 4) {
+    return false
+  }
+
+  const keyOf = t => `${t.name}:${groupToolTarget(t)}`
+  const last = keyOf(recent[recent.length - 1])
+
+  if (!last || last.endsWith(':')) {
+    return false
+  }
+
+  return recent.slice(-4).every(t => keyOf(t) === last)
+}
+
+function toolsFromGroupResume(messages) {
+  const tools = []
+
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    if (msg?.role === 'tool' && msg.name) {
+      tools.push({
+        id: msg.tool_call_id || `${msg.name}:${tools.length}`,
+        name: msg.name,
+        args: msg.args && typeof msg.args === 'object' ? msg.args : {},
+        result: msg.result,
+        pending: false
+      })
+      continue
+    }
+
+    if (msg?.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        const name = tc?.function?.name || tc?.name
+        if (!name) continue
+        tools.push({
+          id: tc.id || `${name}:${tools.length}`,
+          name,
+          args: (() => {
+            try {
+              return typeof tc.function?.arguments === 'string'
+                ? JSON.parse(tc.function.arguments)
+                : tc.arguments || tc.args || {}
+            } catch {
+              return {}
+            }
+          })(),
+          pending: true
+        })
+      }
+    }
+  }
+
+  return tools
+}
+
+function todosFromGroupTools(tools) {
+  for (let i = (tools || []).length - 1; i >= 0; i--) {
+    const tool = tools[i]
+
+    if (tool?.name !== 'todo') {
+      continue
+    }
+
+    const list = tool.result?.todos || tool.args?.todos
+    if (Array.isArray(list) && list.length) {
+      return list.map((item, index) => ({
+        id: item.id || String(index),
+        content: String(item.content || item.title || 'task'),
+        status: item.status || 'pending'
+      }))
+    }
+  }
+
+  return []
+}
+
+function reasoningFromGroupResume(state) {
+  const inflight = typeof state?.inflight === 'object' && state.inflight ? state.inflight : null
+
+  if (inflight?.assistant) {
+    return String(inflight.assistant)
+  }
+
+  const messages = Array.isArray(state?.messages) ? state.messages : []
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg?.role !== 'assistant') continue
+    const text = msg.reasoning || msg.reasoning_content || ''
+    if (text) return String(text)
+    const spoken = groupSpokenSnippet(typeof msg.content === 'string' ? msg.content : msg.text || '')
+    if (spoken) return spoken
+  }
+
+  return ''
+}
+
+function emptyGroupProgress(member) {
+  return {
+    member: member?.name || '',
+    startedAt: Date.now(),
+    thoughtSeconds: null,
+    thinkingText: '',
+    thinkingPending: true,
+    tools: [],
+    todos: [],
+    steps: [],
+    now: 'Heard you — working.',
+    steeredLoop: false,
+    summary: 'is thinking…',
+    busy: true
+  }
+}
+
+function setGroupTurnProgress(group, member, patch) {
+  const key = groupProgressKey(group, member)
+  const prev = $groupTurnProgress.get()[key] || emptyGroupProgress(member)
+  const tools = Array.isArray(patch.tools) ? patch.tools : prev.tools
+  const todos = Array.isArray(patch.todos) ? patch.todos : todosFromGroupTools(tools) || prev.todos
+  const thinkingPending = patch.thinkingPending != null ? patch.thinkingPending : prev.thinkingPending
+  const busy = patch.busy != null ? patch.busy : prev.busy
+  const step = String(patch.step || '').trim()
+  let steps = Array.isArray(patch.steps) ? patch.steps : Array.isArray(prev.steps) ? prev.steps : []
+
+  if (step && steps[steps.length - 1]?.text !== step) {
+    steps = [...steps, { at: Date.now(), text: step }].slice(-8)
+  }
+
+  const next = {
+    ...prev,
+    ...patch,
+    tools,
+    todos,
+    steps,
+    thinkingPending,
+    busy,
+    summary: summarizeGroupToolRun(tools, Boolean(thinkingPending || busy))
+  }
+  next.now = patch.now != null ? String(patch.now) : groupProgressNow(next)
+
+  if (!thinkingPending && next.startedAt && next.thoughtSeconds == null) {
+    next.thoughtSeconds = Math.max(0, Math.round((Date.now() - next.startedAt) / 1000))
+  }
+
+  $groupTurnProgress.set({ ...$groupTurnProgress.get(), [key]: next })
+
+  return next
+}
+
+function snapshotGroupTurnProgress(group, member) {
+  const current = $groupTurnProgress.get()[groupProgressKey(group, member)]
+
+  if (!current) {
+    return null
+  }
+
+  const thoughtSeconds = current.thoughtSeconds != null
+    ? current.thoughtSeconds
+    : current.startedAt
+      ? Math.max(0, Math.round((Date.now() - current.startedAt) / 1000))
+      : null
+
+  return {
+    summary: summarizeGroupToolRun(current.tools, false) || current.summary,
+    thoughtSeconds,
+    thinkingText: String(current.thinkingText || '').slice(0, 2000),
+    tools: (current.tools || []).map(t => ({ name: t.name, pending: false })),
+    todos: current.todos || []
+  }
+}
+
+function applyGroupToolEvent(kind, event) {
+  const sid = event?.session_id
+  const loc = sid ? groupRuntimeIndex.get(String(sid)) : null
+
+  if (!loc) {
+    return null
+  }
+
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : event
+  const name = payload.name || payload.tool || ''
+  const id = payload.tool_id || payload.toolCallId || `${name}:${Date.now()}`
+  const key = groupProgressKey(loc.group, loc.member)
+  const prev = $groupTurnProgress.get()[key] || emptyGroupProgress(loc.member)
+  const tools = [...(prev.tools || [])]
+  const index = tools.findIndex(t => t.id === id || (t.name === name && t.pending))
+  const row = {
+    id,
+    name,
+    args: payload.args && typeof payload.args === 'object' ? payload.args : {},
+    result: payload.result,
+    pending: kind === 'start'
+  }
+
+  if (index >= 0) {
+    tools[index] = { ...tools[index], ...row }
+  } else {
+    tools.push(row)
+  }
+
+  const todos = name === 'todo' && Array.isArray(payload.todos)
+    ? payload.todos.map((item, i) => ({
+        id: item.id || String(i),
+        content: String(item.content || item.title || 'task'),
+        status: item.status || 'pending'
+      }))
+    : undefined
+  const step = groupToolStepLine(row, kind === 'start')
+
+  return setGroupTurnProgress(loc.group, loc.member, {
+    tools,
+    ...(todos ? { todos } : {}),
+    ...(step ? { now: step, step } : {}),
+    busy: true,
+    thinkingPending: true
+  })
+}
+
+function ingestGroupResumeProgress(group, member, state, runtimeSid) {
+  rememberGroupRuntime(group, member, state?.session_id || runtimeSid)
+
+  const messages = Array.isArray(state?.messages) ? state.messages : []
+  const tools = messages.length ? toolsFromGroupResume(messages) : undefined
+  const startedAt = state?.turn_started_at ? Number(state.turn_started_at) * 1000 : undefined
+  const busy = groupSessionIsBusy(state)
+  const thinkingText = reasoningFromGroupResume(state)
+
+  return setGroupTurnProgress(group, member, {
+    ...(tools ? { tools } : {}),
+    ...(startedAt && Number.isFinite(startedAt) ? { startedAt } : {}),
+    ...(thinkingText ? { thinkingText: thinkingText.slice(0, 2000) } : {}),
+    busy,
+    thinkingPending: busy || Boolean(state?.inflight?.streaming)
+  })
 }
 
 // Bot metadata is scoped to the active gateway until the server exposes a
@@ -6798,8 +7252,10 @@ function parseGroupChatMentions(text, members) {
     }
   }
 
-  for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
-    const handle = match[1].toLowerCase()
+  // Leading boundary: `email@dev.com` must not resolve as @dev. Same
+  // `(^|non-word)` rule the roster mention middleware already uses.
+  for (const match of source.matchAll(/(^|[^\w@])@([a-z0-9][a-z0-9._-]*)/gi)) {
+    const handle = match[2].toLowerCase()
 
     if (handle === 'everyone' || handle === 'all') {
       everyone = true
@@ -6854,6 +7310,65 @@ function resolveGroupResponders(log, members) {
   }
 
   return members.filter(member => mentioned.has(groupMemberKey(member)))
+}
+
+/** True when this room log line was posted by `member` (local name, or
+ *  name+source for a cross-connection speaker). */
+function entryIsFromMember(entry, member) {
+  if (entry?.from?.kind !== 'member' || entry.from.name !== member?.name) {
+    return false
+  }
+
+  if (entry.from.source) {
+    return (member.connectionLabel || member.connectionId) === entry.from.source
+  }
+
+  return !member.remoteSource
+}
+
+/** Members explicitly @-mentioned since the last user message who have not
+ *  posted AFTER that mention. Unlike resolveGroupResponders this never
+ *  expands to "everyone" — it is the pull-in debt a last-round or harvested
+ *  @tag still owes. */
+function membersOwedMentionTurn(log, members) {
+  let sinceLastUser = []
+
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (log[i].from.kind === 'user') {
+      sinceLastUser = log.slice(i)
+      break
+    }
+  }
+
+  const lastMentionAt = new Map()
+
+  for (let i = 0; i < sinceLastUser.length; i++) {
+    const parsed = parseGroupChatMentions(sinceLastUser[i].text, members)
+
+    for (const key of parsed.mentioned) {
+      lastMentionAt.set(key, i)
+    }
+  }
+
+  if (!lastMentionAt.size) {
+    return []
+  }
+
+  return members.filter(member => {
+    const key = groupMemberKey(member)
+    const at = lastMentionAt.get(key)
+
+    if (at == null) {
+      return false
+    }
+
+    // The speaker of the mention line already took that turn (self-@).
+    if (entryIsFromMember(sinceLastUser[at], member)) {
+      return false
+    }
+
+    return !sinceLastUser.slice(at + 1).some(entry => entryIsFromMember(entry, member))
+  })
 }
 
 /** Rotate the roster so a different member leads each round. */
@@ -6952,11 +7467,157 @@ function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }) {
     ...deltaLines.map(line => `  ${line}`),
     '',
     'Rules for this room:',
-    '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
-    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
+    '- Start with a short spoken ack the room can show live: who you heard and what you will do next (one sentence). Do not stay silent until the end.',
+    '- Think in short visible steps while you work. The FINAL room post is the full 1:1 conclusive answer — tables, numbers, graphs, MEDIA: screenshots, code, proof. Never a teaser, never "details in my session".',
+    '- If you were @-mentioned, you MUST post that result. Do not reply (pass) to a tag aimed at you. Only untagged chatter with nothing-new may reply exactly "(pass)".',
     '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
-    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
+    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no meta about being an AI.'
   ].join('\n')
+}
+
+/** Resume a member's group session enough to know if a turn is live. */
+async function peekGroupMemberSession(group, member) {
+  const room = $groupChats.get()[group] || {}
+  const stored = room.sessions?.[groupMemberKey(member)]
+
+  if (!stored) {
+    return null
+  }
+
+  try {
+    const state = await requestForBot(member, 'session.resume', {
+      session_id: stored,
+      profile: member.name,
+      omit_messages: true
+    })
+    const runtime = state?.session_id || stored
+    rememberGroupRuntime(group, member, runtime)
+
+    return { stored, runtime, state, busy: groupSessionIsBusy(state) }
+  } catch {
+    return null
+  }
+}
+
+/** 1:1 Enter-while-busy: redirect the live turn, else steer after the next
+ *  tool, else queue as the next turn. Never hard-interrupt. Returns
+ *  'redirected' | 'steered' | 'queued' | 'busy' (live but inject failed) |
+ *  null (idle — caller should start a normal turn). */
+async function steerOrQueueGroupMember(group, member, prompt) {
+  const text = String(prompt || '').trim()
+  const peeked = await peekGroupMemberSession(group, member)
+
+  if (!peeked) {
+    return null
+  }
+
+  if (!peeked.busy) {
+    return null
+  }
+
+  if (!text) {
+    return 'busy'
+  }
+
+  const tryRpc = async (method, params) => {
+    try {
+      return await requestForBot(member, method, params)
+    } catch {
+      return null
+    }
+  }
+
+  const redirected = await tryRpc('session.redirect', { session_id: peeked.runtime, text })
+
+  if (redirected?.status === 'redirected' || redirected?.status === 'queued') {
+    return redirected.status === 'queued' ? 'queued' : 'redirected'
+  }
+
+  const steered = await tryRpc('session.steer', { session_id: peeked.runtime, text })
+
+  if (steered?.status === 'queued') {
+    return 'steered'
+  }
+
+  // queued:true is the 1:1 Cmd+Enter path — drain after settle, never
+  // _handle_busy_submit interrupt/redirect of the live turn.
+  const queued = await tryRpc('prompt.submit', {
+    session_id: peeked.runtime,
+    text,
+    queued: true
+  })
+
+  if (queued != null) {
+    return 'queued'
+  }
+
+  return 'busy'
+}
+
+/** Record that this member's live turn is still owed a room post. Harvest
+ *  picks it up — used for ACK timeout AND for 1:1-style steer/queue, which
+ *  used to advance the watermark and then never post the reply. */
+function strandGroupMember(group, member, thread, before, kind = 'timed-out') {
+  recordGroupActivity(group, { kind, member: member.name, thread })
+  syncGroupClarify(group, member, null)
+  updateGroupChat(group, r => {
+    r.stranded = { ...(r.stranded || {}), [groupMemberKey(member)]: { before: before || 0, thread } }
+    r.turn = member.name
+    return r
+  })
+  setGroupTurnProgress(group, member, { busy: true, thinkingPending: true })
+}
+
+/** If this member is mid-turn, inject unseen thread lines into that turn
+ *  the way 1:1 steers a live composer. Bumps the watermark on success so
+ *  the round loop does not prompt.submit the same delta. Always strands
+ *  so harvest still posts the steered reply into the room. */
+async function injectGroupDeltaIntoBusyMember(group, member, members, thread) {
+  const room = $groupChats.get()[group] || {}
+  const memberKey = groupMemberKey(member)
+  const markKey = `${thread}::${memberKey}`
+  const seen = room.watermarks?.[markKey] || 0
+  const delta = (room.log || []).slice(seen).filter(e => groupThreadOf(e) === thread)
+
+  if (!delta.length) {
+    const peeked = await peekGroupMemberSession(group, member)
+
+    if (peeked?.busy) {
+      strandGroupMember(group, member, thread, groupResumeMessageCount(peeked.state), 'steered')
+      return 'busy'
+    }
+
+    return null
+  }
+
+  const prompt = [
+    'Mid-turn update from the group room. You are still on the same turn — incorporate this like a 1:1 steer. Do not drop the work you were doing unless these messages say otherwise. When you finish, the room post is THIS message: full 1:1 conclusive answer (tables, MEDIA: shots, proof), not a teaser.',
+    '',
+    buildGroupChatTurnPrompt({
+      groupName: group,
+      members,
+      viewer: member,
+      deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name))
+    })
+  ].join('\n')
+
+  const status = await steerOrQueueGroupMember(group, member, prompt)
+  const peeked = await peekGroupMemberSession(group, member)
+  const before = groupResumeMessageCount(peeked?.state)
+
+  if (status === 'redirected' || status === 'steered' || status === 'queued') {
+    updateGroupChat(group, r => {
+      r.watermarks[markKey] = r.log.length
+      return r
+    })
+    strandGroupMember(group, member, thread, before, 'steered')
+  } else if (status === 'busy') {
+    // Inject RPCs failed — still strand so harvest retries instead of
+    // dropping the @tag as "busy, skip".
+    strandGroupMember(group, member, thread, before, 'steered')
+  }
+
+  return status
 }
 
 /** Trim a room log + its watermarks to the retained window, keeping
@@ -6974,6 +7635,36 @@ function trimGroupChatLog(log, watermarks, limit = GROUP_CHAT_HISTORY_LIMIT * 4)
   }
 
   return { log: log.slice(drop), watermarks: trimmed }
+}
+
+/** File-backed room log. localStorage silently drops ~1–2 MB dumps (quota
+ *  catch in writeKey), so a Chromium profile reset used to wipe every room.
+ *  Desktop polls this path on boot; persist writes it whenever the atom does. */
+const GROUP_CHATS_FILE = 'C:/Users/imba/AppData/Local/hermes/webui/desktop-group-chats-push.json'
+
+function desktopFileBridge() {
+  return typeof window !== 'undefined' ? window.hermesDesktop : null
+}
+
+function readDesktopFileText(path) {
+  const desktop = desktopFileBridge()
+  const fn = desktop?.readFileText || pluginCtx?.host?.readFileText || pluginCtx?.desktop?.readFileText
+  if (typeof fn !== 'function') {
+    return Promise.resolve(null)
+  }
+
+  return Promise.resolve(fn(path))
+    .then(raw => (typeof raw === 'string' ? raw : raw && raw.text) || null)
+    .catch(() => null)
+}
+
+function persistGroupChatsFile(durable) {
+  const fn = desktopFileBridge()?.writeTextFile
+  if (typeof fn !== 'function') {
+    return
+  }
+
+  Promise.resolve(fn(GROUP_CHATS_FILE, JSON.stringify({ groups: durable }))).catch(() => undefined)
 }
 
 /** Mutate one group's room state through the atom + persist the durable part. */
@@ -7020,11 +7711,17 @@ function updateGroupChat(group, mutate, { sync = true } = {}) {
         roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
         // Room picture (small data URL, same normalization as bot avatars).
         image: room.image || null,
-        syncRevision: Math.max(0, Number(room.syncRevision || 0))
+        syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+        // Slack-style threads the user ended. Survives reload so an ended
+        // topic stays closed and does not auto-expand as "newest".
+        endedThreads: room.endedThreads && typeof room.endedThreads === 'object' ? room.endedThreads : {},
+        hiddenThreads: room.hiddenThreads && typeof room.hiddenThreads === 'object' ? room.hiddenThreads : {},
+        activeThread: typeof room.activeThread === 'string' && room.activeThread ? room.activeThread : null
       }
     }
 
     Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durable)).catch(() => undefined)
+    persistGroupChatsFile(durable)
   } catch {
     /* storage unavailable — room survives for this window only */
   }
@@ -7033,6 +7730,43 @@ function updateGroupChat(group, mutate, { sync = true } = {}) {
   }
 
   return next
+}
+
+function isGroupThreadEnded(group, thread) {
+  const ended = ($groupChats.get()[group] || {}).endedThreads || {}
+
+  return Boolean(thread && ended[thread])
+}
+
+/** Mark a Slack-style thread ended: no more reply box, no more drive for
+ *  this thread. Cancels the in-flight loop only when it belongs to this
+ *  thread (room.driveThread), so ending A does not kill B. */
+function endGroupThread(group, thread) {
+  if (!thread) {
+    return
+  }
+
+  updateGroupChat(group, r => {
+    r.endedThreads = { ...(r.endedThreads || {}), [thread]: true }
+
+    if (r.driveThread === thread || (r.running && !r.driveThread)) {
+      r.epoch = (r.epoch || 0) + 1
+      r.running = false
+      r.turn = null
+      r.driveThread = null
+    }
+
+    r.hiddenThreads = { ...(r.hiddenThreads || {}), [thread]: true }
+
+    if (r.activeThread === thread) {
+      const next = listGroupThreads(r).find(item => item.id !== thread && !r.hiddenThreads[item.id])
+      r.activeThread = next ? next.id : null
+    }
+
+    r.composingNew = false
+    return r
+  })
+  recordGroupActivity(group, { kind: 'ended', member: null, thread })
 }
 
 /** Soft-disband a group chat: remove only this group from every local member's
@@ -7113,6 +7847,7 @@ async function disbandGroupChat(group, members) {
     }
 
     await Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durable))
+    persistGroupChatsFile(durable)
   } catch {
     /* storage unavailable — the atom reset above still empties the room */
   }
@@ -7135,6 +7870,83 @@ async function disbandGroupChat(group, members) {
   if (typeof queryClient !== 'undefined' && queryClient?.invalidateQueries) {
     queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
   }
+}
+
+/** Seat one more bot in a live room. Local bots also gain the group in
+ *  ui_meta; remotes live only on the room record. */
+async function addGroupChatMember(group, bot) {
+  const name = String(group || '').trim()
+
+  if (!name || !bot?.name) {
+    return { ok: false, reason: 'missing' }
+  }
+
+  const room = $groupChats.get()[name]
+
+  if (!room || room.tombstone) {
+    return { ok: false, reason: 'no-room' }
+  }
+
+  const key = botRosterKey(bot)
+  const current = Array.isArray(room.members) ? room.members : []
+
+  if (current.some(member => botRosterKey(member) === key)) {
+    return { ok: false, reason: 'already' }
+  }
+
+  if (current.length >= GROUP_CHAT_MAX_MEMBERS) {
+    return { ok: false, reason: 'cap' }
+  }
+
+  updateGroupChat(name, next => {
+    next.members = [...(Array.isArray(next.members) ? next.members : []), ...durableGroupChatMembers([bot])]
+    return next
+  })
+
+  if (!bot.remoteSource) {
+    const meta = $botMeta.get()[bot.name] || {}
+    await saveBotMeta(bot.name, groupMembershipPatch(meta, name, true))
+  }
+
+  return { ok: true }
+}
+
+/** Unseat a bot. Refuses to drop the last member — that is Disband. */
+async function removeGroupChatMember(group, bot) {
+  const name = String(group || '').trim()
+
+  if (!name || !bot?.name) {
+    return { ok: false, reason: 'missing' }
+  }
+
+  const room = $groupChats.get()[name]
+
+  if (!room || room.tombstone) {
+    return { ok: false, reason: 'no-room' }
+  }
+
+  const key = botRosterKey(bot)
+  const seatedNow = groupChatMemberBots(name, [], $botMeta.get())
+
+  if (!seatedNow.some(member => botRosterKey(member) === key)) {
+    return { ok: false, reason: 'missing' }
+  }
+
+  if (seatedNow.length <= 1) {
+    return { ok: false, reason: 'last' }
+  }
+
+  updateGroupChat(name, next => {
+    next.members = (Array.isArray(next.members) ? next.members : []).filter(member => botRosterKey(member) !== key)
+    return next
+  })
+
+  if (!bot.remoteSource) {
+    const meta = $botMeta.get()[bot.name] || {}
+    await saveBotMeta(bot.name, groupMembershipPatch(meta, name, false))
+  }
+
+  return { ok: true }
 }
 
 /** Set or clear a group chat's room picture (small data URL, normalized by
@@ -7270,7 +8082,7 @@ function normalizeGroupChatText(text) {
   return trimmed === GROUP_EMPTY_SENTINEL ? GROUP_EMPTY_FRIENDLY : trimmed
 }
 
-function appendGroupChatEntry(group, from, text, thread, images) {
+function appendGroupChatEntry(group, from, text, thread, images, progress) {
   const entry = {
     id: groupChatEntryId(),
     at: Date.now(),
@@ -7280,11 +8092,14 @@ function appendGroupChatEntry(group, from, text, thread, images) {
   }
 
   if (Array.isArray(images) && images.length) {
-    // [{ name, data }] — data URLs. Persisted with the room log so reloads
-    // keep showing what the members were shown.
+    // [{ name, data }] — data URLs, hermes-media://, or http(s). Persisted
+    // with the room log so reloads keep showing shots the member posted.
     entry.images = images
   }
 
+  if (progress && typeof progress === 'object') {
+    entry.progress = progress
+  }
   // #93127 insurance: a residual double-append path (stale loop + fresh
   // loop both committing the same member reply) lands back-to-back and
   // byte-identical. Drop the echo instead of flooding the room. User
@@ -7512,6 +8327,173 @@ async function submitGroupTurnPrompt(member, runtime, stored, text) {
 // timed out at 3 minutes, read as a pass, and its finished result never
 // reached the room (db's Aug 2026 report).
 const GROUP_TURN_HARD_CAP_MS = 20 * 60000
+const GROUP_WRAP_UP_PROMPT = 'Stop repeating tools. Post what you have NOW as the room message: full 1:1 conclusive answer (tables, numbers, proof). Do not (pass). Do not start a new investigation.'
+
+/** Transcript length from a resume snapshot. Prefer the messages array when
+ *  it actually has rows; otherwise message_count — omit_messages / deferred
+ *  history returns messages=[] with a real count, and treating [] as "0"
+ *  made every long turn look unfinished. */
+function groupResumeMessageCount(state) {
+  if (Array.isArray(state?.messages) && state.messages.length) {
+    return state.messages.length
+  }
+
+  const count = Number(state?.message_count)
+
+  return Number.isFinite(count) ? count : 0
+}
+
+/** A member is still working if the live session says so — including the
+ *  cold-resume hydration window, which reports running=false / inflight=null
+ *  and used to trip the 3-minute timeout. */
+function groupSessionIsBusy(state) {
+  if (!state) {
+    return false
+  }
+
+  if (state.inflight || state.running || state.hydrating || state.compressing) {
+    return true
+  }
+
+  const status = String(state.status || '')
+
+  return status === 'streaming' || status === 'resuming' || status === 'compressing'
+}
+
+function extractGroupAssistantText(messages) {
+  return extractGroupAssistantReply(messages).text
+}
+
+const GROUP_MEDIA_RE = /[`"']?MEDIA:\s*(`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|\S+)[`"']?/g
+const GROUP_IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:\?.*)?$/i
+
+function unquoteGroupMediaPath(value) {
+  const trimmed = String(value || '').trim()
+  const quote = trimmed[0]
+
+  return quote && quote === trimmed.at(-1) && ['"', "'", '`'].includes(quote)
+    ? trimmed.slice(1, -1)
+    : trimmed
+}
+
+function groupMediaName(path) {
+  return String(path || '').split(/[\\/]/).filter(Boolean).pop() || 'media'
+}
+
+function groupMediaSrc(path) {
+  const value = String(path || '').trim()
+
+  if (!value) {
+    return ''
+  }
+
+  if (/^(?:https?|data|hermes-media):/i.test(value)) {
+    return value
+  }
+
+  return `hermes-media://stream/${encodeURIComponent(value)}`
+}
+
+function isGroupImagePath(path) {
+  return GROUP_IMAGE_EXT_RE.test(String(path || '').split(/[?#]/, 1)[0] || '') || /^data:image\//i.test(path)
+}
+
+/** Last assistant bubble as the room should show it: full markdown (tables
+ *  included), MEDIA: rewritten to inline markdown, image_url parts lifted
+ *  onto `images` so the log renders shots the way 1:1 does. */
+function extractGroupAssistantReply(messages, fromIndex = 0) {
+  const empty = { text: '', images: [] }
+
+  if (!Array.isArray(messages)) {
+    return empty
+  }
+
+  // Compaction can shrink the transcript below `fromIndex` (the pre-submit
+  // count). Search the whole remaining list in that case; otherwise only
+  // NEW messages so a trailing `(pass)` cannot resurrect an older turn.
+  const start = messages.length < fromIndex ? 0 : Math.max(0, fromIndex)
+
+  let raw = ''
+  const images = []
+  const seen = new Set()
+
+  const pushImage = (path, name) => {
+    const src = groupMediaSrc(path)
+
+    if (!src || !isGroupImagePath(path) || seen.has(src)) {
+      return
+    }
+
+    seen.add(src)
+    images.push({ name: name || groupMediaName(path), data: src })
+  }
+
+  for (let i = messages.length - 1; i >= start; i--) {
+    const msg = messages[i]
+
+    if (msg?.role !== 'assistant') {
+      continue
+    }
+
+    images.length = 0
+    seen.clear()
+
+    if (typeof msg.content === 'string') {
+      raw = msg.content
+    } else if (Array.isArray(msg.content)) {
+      raw = msg.content.map(part => {
+        if (typeof part === 'string') {
+          return part
+        }
+
+        const url = part?.image_url?.url || (part?.type === 'image_url' && part?.url) || ''
+
+        if (url) {
+          pushImage(url, part?.name)
+          return isGroupImagePath(url) ? `![${groupMediaName(url)}](${groupMediaSrc(url)})` : ''
+        }
+
+        return part?.text || ''
+      }).join('')
+    } else {
+      raw = msg?.text || ''
+    }
+
+    // Watch-pattern / heartbeat user lines often make the model emit a
+    // trailing `(pass)` after a real writeup. Last-assistant-wins then
+    // drops the room post (Tester `@dev` 2026-08-25 23:14).
+    if (!String(raw || '').trim() || isGroupPassText(raw)) {
+      continue
+    }
+
+    break
+  }
+
+  if (!String(raw || '').trim() || isGroupPassText(raw)) {
+    return empty
+  }
+
+  let text = String(raw || '')
+  text = text.replace(GROUP_MEDIA_RE, (match, value) => {
+    const path = unquoteGroupMediaPath(value)
+
+    if (!path) {
+      return match
+    }
+
+    const src = groupMediaSrc(path)
+    const name = groupMediaName(path)
+
+    if (isGroupImagePath(path)) {
+      pushImage(path, name)
+      return `![${name}](${src})`
+    }
+
+    return `[${name}](${src})`
+  })
+
+  return { text: text.trim(), images }
+}
 
 /** Mirror a member's pending prompt — clarify question OR command approval —
  *  from its resume snapshot into the room store, keyed
@@ -7686,6 +8668,8 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
   const memberKey = groupMemberKey(member)
 
   recordGroupActivity(group, { kind: 'working', member: member.name, thread })
+  rememberGroupRuntime(group, member, runtime)
+  setGroupTurnProgress(group, member, emptyGroupProgress(member))
 
   // Baseline: how many messages exist before our submit.
   let before = 0
@@ -7693,11 +8677,16 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
   try {
     const pre = await requestForBot(member, 'session.resume', {
       session_id: stored || runtime,
-      profile: member.name
+      profile: member.name,
+      omit_messages: true
     })
-    before = Array.isArray(pre?.messages) ? pre.messages.length : pre?.message_count || 0
+    before = groupResumeMessageCount(pre)
   } catch {
     /* lazy session — zero messages */
+  }
+
+  const markStranded = () => {
+    strandGroupMember(group, member, thread, before, 'timed-out')
   }
 
   // Stage this delta's attachments into the member's session so the model
@@ -7749,13 +8738,17 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
     ? `${prompt}\n\nAttached files staged in your session workspace:\n${fileRefs.join('\n')}`
     : prompt
 
-  // #93602: one-shot recovery when the runtime session was reaped between
-  // minting and submitting. Tracks the runtime id the submit landed on so
-  // the poll fallback below targets a live session.
-  const liveRuntime = await submitGroupTurnPrompt(member, runtime, stored, turnText)
+  let liveRuntime
+  try {
+    liveRuntime = await submitGroupTurnPrompt(member, runtime, stored, turnText)
+  } catch {
+    markStranded()
+    return null
+  }
 
   const started = Date.now()
   let deadline = started + GROUP_TURN_TIMEOUT_MS
+  let polls = 0
 
   while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, GROUP_TURN_POLL_MS))
@@ -7775,38 +8768,73 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
     let state = null
 
     try {
+      polls += 1
+      const wantTools = polls % 3 === 0
       state = await requestForBot(member, 'session.resume', {
         session_id: stored || liveRuntime,
-        profile: member.name
+        profile: member.name,
+        omit_messages: !wantTools
       })
     } catch {
       continue
     }
 
-    const messages = Array.isArray(state?.messages) ? state.messages : []
-    const busy = Boolean(state?.inflight || state?.running)
+    ingestGroupResumeProgress(group, member, state, runtime)
+
+    const liveSnap = $groupTurnProgress.get()[groupProgressKey(group, member)]
+
+    if (liveSnap && groupToolsLooping(liveSnap.tools) && !liveSnap.steeredLoop) {
+      setGroupTurnProgress(group, member, {
+        steeredLoop: true,
+        now: 'Stuck repeating a tool — wrapping up to post findings.',
+        step: 'Stuck repeating a tool — wrapping up to post findings.'
+      })
+      try {
+        await steerOrQueueGroupMember(group, member, GROUP_WRAP_UP_PROMPT)
+      } catch {
+        /* harvest still owns the reply */
+      }
+    }
+
+    const count = groupResumeMessageCount(state)
+    const busy = groupSessionIsBusy(state)
+    // Compaction rewrites the transcript and DROPS message_count (405 → 181
+    // on the ComfyUI-rework @dev turn). Treat a shrink + idle as "done",
+    // not "no progress" — otherwise harvest deletes the marker and the
+    // finished reply never reaches the room.
+    const compacted = !busy && count < before
     // A clarify blocking inside the member's session is a question for the
     // HUMAN (#90694) — mirror it into the room store so a card renders, and
     // hold the turn open: the member isn't stalling, it's waiting on us.
     const awaitingUser = syncGroupClarify(group, member, state)
     const done = !busy && !awaitingUser
 
-    if (messages.length > before && done) {
-      const replyText = pickGroupTurnReply(messages, before)
+    if ((count > before || compacted) && done) {
+      let messages = Array.isArray(state?.messages) ? state.messages : []
 
-      if (replyText !== null) {
-        recordGroupActivity(group, {
-          kind: isGroupPassText(replyText) ? 'passed' : 'replied',
-          member: member.name,
-          thread
-        })
-
-        return replyText
+      if (!messages.length) {
+        try {
+          const full = await requestForBot(member, 'session.resume', {
+            session_id: stored || runtime,
+            profile: member.name
+          })
+          messages = Array.isArray(full?.messages) ? full.messages : []
+        } catch {
+          break
+        }
       }
 
-      recordGroupActivity(group, { kind: 'passed', member: member.name, thread })
+      const reply = extractGroupAssistantReply(messages, before)
+      ingestGroupResumeProgress(group, member, { ...state, messages, running: false, inflight: null }, runtime)
+      setGroupTurnProgress(group, member, { busy: false, thinkingPending: false })
 
-      return null
+      recordGroupActivity(group, {
+        kind: reply.text && !isGroupPassText(reply.text) ? 'replied' : 'passed',
+        member: member.name,
+        thread
+      })
+
+      return reply.text ? reply : null
     }
 
     // Still visibly working — or waiting on the user's answer to a clarify:
@@ -7817,16 +8845,17 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
     }
   }
 
-  // Timeout — clear any still-mirrored question card (the server-side
-  // clarify timeout runs its own course) and read as a pass, but remember the baseline + thread
-  // (runtime-only) so the finished reply can be posted late into the RIGHT
-  // thread instead of vanishing.
-  recordGroupActivity(group, { kind: 'timed-out', member: member.name, thread })
-  syncGroupClarify(group, member, null)
-  updateGroupChat(group, r => {
-    r.stranded = { ...(r.stranded || {}), [groupMemberKey(member)]: { before, thread } }
-    return r
+  // Hard cap — never a silent pass. Steer a wrap-up, then harvest the post.
+  setGroupTurnProgress(group, member, {
+    now: 'Ran long — posting what you have.',
+    step: 'Ran long — posting what you have.'
   })
+  try {
+    await steerOrQueueGroupMember(group, member, GROUP_WRAP_UP_PROMPT)
+  } catch {
+    /* strand + harvest still owns the reply */
+  }
+  markStranded()
 
   return null
 }
@@ -7834,7 +8863,7 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
 /** Post a timed-out member's finished reply into the room, if it landed
  *  after we stopped waiting. Called at the member's next turn boundary and
  *  on user sends, so long-running work is delivered late rather than lost. */
-async function harvestStrandedGroupReply(group, member) {
+async function harvestStrandedGroupReply(group, member, members) {
   const memberKey = groupMemberKey(member)
   const room = $groupChats.get()[group] || {}
   const marker = room.stranded?.[memberKey]
@@ -7858,8 +8887,8 @@ async function harvestStrandedGroupReply(group, member) {
     return // source unreachable — leave the marker for the next boundary
   }
 
-  if (state?.inflight || state?.running) {
-    return // still grinding — keep waiting
+  if (groupSessionIsBusy(state)) {
+    return // still grinding / hydrating — keep waiting
   }
 
   // A stranded member blocked on a clarify is not "grinding" — surface the
@@ -7868,7 +8897,24 @@ async function harvestStrandedGroupReply(group, member) {
     return
   }
 
-  // Done (or dead): the marker is consumed either way.
+  const messages = Array.isArray(state?.messages) ? state.messages : []
+  const count = groupResumeMessageCount(state)
+  const compacted = count < strandedBefore
+
+  // A cold resume can report idle with messages=[] (deferred / omitted).
+  // Consuming the marker there is how finished replies vanished.
+  if (!messages.length && (state?.messages_omitted || state?.hydrating || (count <= strandedBefore && !compacted))) {
+    if (state?.messages_omitted || state?.hydrating) {
+      return
+    }
+  }
+
+  const reply = extractGroupAssistantReply(messages, strandedBefore)
+  ingestGroupResumeProgress(group, member, { ...state, messages, running: false, inflight: null })
+  setGroupTurnProgress(group, member, { busy: false, thinkingPending: false })
+
+  // Done (or dead): the marker is consumed either way. Compaction (count
+  // dropped) still counts as done — extract the last assistant line.
   updateGroupChat(group, r => {
     const next = { ...(r.stranded || {}) }
     delete next[memberKey]
@@ -7876,27 +8922,72 @@ async function harvestStrandedGroupReply(group, member) {
     return r
   })
 
-  const messages = Array.isArray(state?.messages) ? state.messages : []
-
-  if (messages.length <= strandedBefore) {
-    return
-  }
-
-  const reply = pickGroupTurnReply(messages, strandedBefore)
-
-  if (reply && !isGroupPassText(reply)) {
+  if (reply.text && !isGroupPassText(reply.text) && (count > strandedBefore || compacted || messages.length)) {
     recordGroupActivity(group, { kind: 'delivered', member: member.name, thread: strandedThread })
     appendGroupChatEntry(
       group,
       { kind: 'member', name: member.name, ...(member.remoteSource ? { source: member.connectionLabel || member.connectionId } : {}) },
-      reply,
-      strandedThread
+      reply.text,
+      strandedThread,
+      reply.images,
+      snapshotGroupTurnProgress(group, member)
     )
     updateGroupChat(group, r => {
       r.watermarks[`${strandedThread}::${memberKey}`] = r.log.length
       return r
     })
   }
+
+  const roomNow = $groupChats.get()[group] || {}
+  const seated = Array.isArray(members) && members.length
+    ? members
+    : Array.isArray(roomNow.members) && roomNow.members.length
+      ? roomNow.members
+      : [member]
+  // Always kick: a harvested (pass) used to skip this, so a peer @tag
+  // posted while this member was stranded never started a new drive.
+  kickGroupChatIfMentionsOwed(group, seated, strandedThread)
+}
+
+/** If a posted (or harvested) line @-tagged members who have not spoken
+ *  since, inject into anyone already mid-turn (1:1 steer/queue) and start
+ *  a drive for idle owed members. Busy is not a skip. */
+function kickGroupChatIfMentionsOwed(group, members, thread) {
+  const room = $groupChats.get()[group]
+
+  if (!room || room.tombstone || isGroupThreadEnded(group, thread)) {
+    return
+  }
+
+  const log = (room.log || []).filter(e => groupThreadOf(e) === thread)
+  const owed = membersOwedMentionTurn(log, members)
+
+  if (!owed.length) {
+    return
+  }
+
+  for (const member of owed) {
+    void injectGroupDeltaIntoBusyMember(group, member, members, thread)
+  }
+
+  if (room.running) {
+    return
+  }
+
+  updateGroupChat(group, r => {
+    r.epoch = (r.epoch || 0) + 1
+    r.running = true
+    r.driveThread = thread
+    return r
+  })
+  recordGroupActivity(group, { kind: 'queued', member: null, thread })
+  void runGroupChatRounds(group, members, thread).catch(() => {
+    updateGroupChat(group, r => {
+      r.running = false
+      r.driveThread = null
+      return r
+    })
+  })
 }
 
 // --- room-turn decision helpers (#93127) — pure, vm-sliced by tests ---
@@ -8179,9 +9270,20 @@ async function runGroupChatRounds(group, members, thread) {
   // passed with nothing pending); 'capped' means a round/message/continuation
   // cap forced the exit — the activity feed must tell those apart.
   let exitKind = 'settled'
+  const attempted = new Set()
+  updateGroupChat(group, r => {
+    r.driveThread = thread
+    return r
+  })
 
   try {
-    for (let round = 0; round < GROUP_CHAT_MAX_ROUNDS; round++) {
+    const hardCap = GROUP_CHAT_MAX_ROUNDS + Math.max(1, members.length)
+
+    for (let round = 0; round < hardCap; round++) {
+      if (isGroupThreadEnded(group, thread) || !isCurrent()) {
+        recordGroupActivity(group, { kind: isGroupThreadEnded(group, thread) ? 'ended' : 'cancelled', member: null, thread })
+        return
+      }
       // Deliver any replies that finished after their turn timed out —
       // every member, not just this round's responders, so long work is
       // late, never lost.
@@ -8191,25 +9293,14 @@ async function runGroupChatRounds(group, members, thread) {
           return
         }
 
-        await harvestStrandedGroupReply(group, member)
+        await harvestStrandedGroupReply(group, member, members)
       }
 
       const roomLog = (($groupChats.get()[group] || {}).log || []).filter(e => groupThreadOf(e) === thread)
-      // Exclude members the harvest pass just above confirmed are STILL
-      // running (their stranded marker survived harvest because
-      // state.inflight/running was true). Re-selecting one here would
-      // prompt.submit into their live session — the gateway's default busy
-      // policy redirects or hard-interrupts that turn (tui_gateway's
-      // _handle_busy_submit), killing exactly the long-running work this
-      // stranded/harvest mechanism exists to protect. Skip them; the next
-      // harvest pass picks the reply up once it actually lands. A marker's
-      // mere presence means "still stranded" (harvestStrandedGroupReply
-      // deletes it once the member is confirmed done/dead) — presence, not
-      // value shape, since markers are a bare number pre-thread or
-      // {before, thread} post-thread.
-      const strandedNow = ($groupChats.get()[group] || {}).stranded || {}
+      // Busy members still get the new delta — via session.redirect / steer /
+      // queued prompt.submit, never a live prompt.submit (that hits the
+      // gateway interrupt policy). Idle members take a normal turn.
       const responders = rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
-        .filter(member => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
       let spokeThisRound = 0
 
       for (const member of responders) {
@@ -8225,6 +9316,7 @@ async function runGroupChatRounds(group, members, thread) {
         const room = $groupChats.get()[group] || { log: [], watermarks: {} }
         const memberKey = groupMemberKey(member)
         const markKey = `${thread}::${memberKey}`
+        attempted.add(memberKey)
         const seen = room.watermarks[markKey] || 0
         // Delta: NEW room entries, narrowed to this thread — the member's
         // turn sees only the conversation it's part of.
@@ -8259,7 +9351,13 @@ async function runGroupChatRounds(group, members, thread) {
           if (!heldEntry.noted) {
             recordGroupActivity(group, { kind: 'held', member: member.name, thread })
           }
+          continue
+        }
 
+        const injected = await injectGroupDeltaIntoBusyMember(group, member, members, thread)
+
+        if (injected) {
+          // redirected / steered / queued / busy — do not prompt.submit.
           continue
         }
 
@@ -8284,15 +9382,15 @@ async function runGroupChatRounds(group, members, thread) {
           return r
         })
 
+        let turn = null
         let reply = null
+        let replyImages
 
         try {
-          reply = await runGroupChatMemberTurn(group, member, prompt, thread, deltaImages)
+          turn = await runGroupChatMemberTurn(group, member, prompt, thread, deltaImages)
+          reply = typeof turn === 'string' ? turn : turn?.text ?? null
+          replyImages = turn && typeof turn === 'object' ? turn.images : undefined
 
-          // Needs-attention hook (#93091 item 3): a turn that produced a real
-          // reply (or an explicit pass) is a good turn — clear the badge.
-          // A timed-out turn also returns null but never threw; leaving any
-          // prior badge in place there is the conservative choice.
           if (reply !== null) {
             clearBotAttention(groupMemberKey(member))
           }
@@ -8305,26 +9403,15 @@ async function runGroupChatRounds(group, members, thread) {
             ...(reason ? { reason } : {})
           })
           noteBotAttention(groupMemberKey(member), reason || error?.message || error)
-          reply = null // a failed turn is a pass, never a room error
+          turn = null
+          reply = null
+          replyImages = undefined
         }
 
-        // #93127: the turn may have finished AFTER a newer user send bumped
-        // the room epoch. That newer send's loop re-drives this member with
-        // the full delta, so committing this stale result (watermark advance
-        // + append) would double-deliver the same reply. Drop it here —
-        // BEFORE the watermark advance and BEFORE the append. Only a newer
-        // USER entry in THIS thread makes the re-drive premise true: a
-        // cross-thread send bumps the epoch too, but its loop filters this
-        // thread out and would never regenerate the finished reply. The
-        // during-turn tail is anchored by entry id, not index — the history
-        // trim drops entries from the FRONT, so an index slice could
-        // overshoot after a mid-turn trim and silently commit a stale turn.
         const roomNow = $groupChats.get()[group] || { log: [] }
         const epochNow = roomNow.epoch || 0
         const anchorId = room.log.length ? room.log[room.log.length - 1].id : null
         const anchorIdx = anchorId === null ? -1 : roomNow.log.findIndex(e => e.id === anchorId)
-        // Anchor trimmed away ⇒ every pre-turn entry was dropped, so every
-        // surviving entry is newer — scanning the whole log stays exact.
         const turnTail = anchorIdx >= 0 ? roomNow.log.slice(anchorIdx + 1) : roomNow.log
         const newerUserEntryInThread = turnTail.some(
           e => e.from?.kind === 'user' && groupThreadOf(e) === thread
@@ -8346,7 +9433,9 @@ async function runGroupChatRounds(group, members, thread) {
             group,
             { kind: 'member', name: member.name, ...(member.remoteSource ? { source: member.connectionLabel || member.connectionId } : {}) },
             reply,
-            thread
+            thread,
+            replyImages,
+            snapshotGroupTurnProgress(group, member)
           )
           // Its own message counts as seen too.
           updateGroupChat(group, r => {
@@ -8491,6 +9580,9 @@ async function runGroupChatRounds(group, members, thread) {
       updateGroupChat(group, r => {
         r.running = false
         r.turn = null
+        if (r.driveThread === thread) {
+          r.driveThread = null
+        }
         return r
       })
 
@@ -8501,23 +9593,45 @@ async function runGroupChatRounds(group, members, thread) {
       // (window feature-detect: the engine also runs under node in tests.)
       const strandedLeft = Object.keys(($groupChats.get()[group] || {}).stranded || {})
 
-      if (strandedLeft.length && typeof window !== 'undefined') {
+      if (strandedLeft.length) {
         void harvestStrandedUntilSettled(group, members, thread)
+      }
+
+      const leftoverLog = (($groupChats.get()[group] || {}).log || []).filter(e => groupThreadOf(e) === thread)
+      const leftoverRoom = $groupChats.get()[group] || {}
+      const leftoverOwed = membersOwedMentionTurn(leftoverLog, members).filter(member => {
+        const key = groupMemberKey(member)
+        if ((leftoverRoom.stranded || {})[key]) {
+          return true
+        }
+
+        const seen = leftoverRoom.watermarks?.[`${thread}::${key}`] || 0
+
+        return seen < leftoverLog.length
+      })
+
+      if (leftoverOwed.length) {
+        kickGroupChatIfMentionsOwed(group, members, thread)
       }
     }
   }
 }
 
-/** Bounded background harvest for members whose replies outlived the turn
- *  loop. Polls every 5s for up to 5 minutes; stops early when nothing is
- *  stranded, a new loop takes the room over (it harvests on its own), or the
- *  room record disappears (disband). */
+/** Background harvest for members whose replies outlived the turn loop.
+ *  Polls every 5s. Untagged work stops after 5 minutes; a tagged/owed
+ *  member is harvested until they post — never a silent death. */
 async function harvestStrandedUntilSettled(group, members, thread) {
   const HARVEST_INTERVAL_MS = 5000
   const HARVEST_MAX_TRIES = 60
 
-  for (let attempt = 0; attempt < HARVEST_MAX_TRIES; attempt++) {
-    await new Promise(resolve => window.setTimeout(resolve, HARVEST_INTERVAL_MS))
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) {
+      if (typeof window === 'undefined') {
+        return
+      }
+
+      await new Promise(resolve => setTimeout(resolve, HARVEST_INTERVAL_MS))
+    }
 
     const room = $groupChats.get()[group]
 
@@ -8534,15 +9648,26 @@ async function harvestStrandedUntilSettled(group, members, thread) {
     for (const member of members) {
       if (Object.prototype.hasOwnProperty.call(stranded, groupMemberKey(member))) {
         try {
-          await harvestStrandedGroupReply(group, member)
+          await harvestStrandedGroupReply(group, member, members)
         } catch {
-          // Best-effort: the next tick retries; the bound stops runaways.
+          // Best-effort: the next tick retries; owed members keep going.
         }
       }
     }
-  }
 
-  recordGroupActivity(group, { kind: 'failed', member: null, thread })
+    if (attempt + 1 >= HARVEST_MAX_TRIES) {
+      const latest = $groupChats.get()[group] || {}
+      const left = latest.stranded || {}
+      const log = (latest.log || []).filter(e => groupThreadOf(e) === thread)
+      const owed = membersOwedMentionTurn(log, members)
+      const owedStranded = owed.some(member => Object.prototype.hasOwnProperty.call(left, groupMemberKey(member)))
+
+      if (!owedStranded) {
+        recordGroupActivity(group, { kind: 'failed', member: null, thread })
+        return
+      }
+    }
+  }
 }
 
 /** User send into a group room. `thread` continues that thread (its reply
@@ -8573,6 +9698,18 @@ function sendToGroupChat(group, members, text, thread, images) {
   const wasRunning = ($groupChats.get()[group] || {}).running === true
 
   updateGroupChat(group, room => {
+    if (room.endedThreads?.[target]) {
+      const next = { ...room.endedThreads }
+      delete next[target]
+      room.endedThreads = next
+    }
+    if (room.hiddenThreads?.[target]) {
+      const shown = { ...room.hiddenThreads }
+      delete shown[target]
+      room.hiddenThreads = shown
+    }
+    room.activeThread = target
+    room.composingNew = false
     room.epoch = (room.epoch || 0) + 1
     room.running = true
     // #93129: user text is the ONLY input that changes member holds. An
@@ -8586,10 +9723,17 @@ function sendToGroupChat(group, members, text, thread, images) {
       { at: sent?.at, byMessageId: sent?.id, thread: target },
       members.map(member => groupMemberKey(member))
     )
+    room.driveThread = target
     return room
   })
 
   recordGroupActivity(group, { kind: 'queued', member: 'You', thread: target })
+
+  const seated = members
+  const logNow = (($groupChats.get()[group] || {}).log || []).filter(e => groupThreadOf(e) === target)
+  for (const member of resolveGroupResponders(logNow, seated)) {
+    void injectGroupDeltaIntoBusyMember(group, member, seated, target)
+  }
 
   if (!wasRunning) {
     void runGroupChatRounds(group, members, target).catch(() => {
@@ -12446,14 +13590,19 @@ function GroupImageControls({ image, onImage, seedName, seedMembers }) {
  *  the room record. Both apply on Save so a cancelled dialog changes nothing. */
 function GroupChatSettingsDialog({ group, members, open, onClose, onRenamed }) {
   const rooms = useValue($groupChats)
+  const allMeta = useValue($botMeta)
+  const { data } = useRoster()
+  const roster = Array.isArray(data?.profiles) ? data.profiles : []
   const current = (rooms[group] || {}).image || null
   const [name, setName] = useState(group)
   const [image, setImage] = useState(current)
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
     if (open) {
       setName(group)
       setImage(current)
+      setQuery('')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, group])
@@ -12476,6 +13625,10 @@ function GroupChatSettingsDialog({ group, members, open, onClose, onRenamed }) {
     }
   }
 
+  const seatedKeys = new Set((members || []).map(botRosterKey))
+  const atCap = (members || []).length >= GROUP_CHAT_MAX_MEMBERS
+  const candidates = filterBots(roster, allMeta, query).filter(bot => !seatedKeys.has(botRosterKey(bot)))
+
   return jsx(Dialog, {
     open,
     onOpenChange: value => {
@@ -12484,13 +13637,13 @@ function GroupChatSettingsDialog({ group, members, open, onClose, onRenamed }) {
       }
     },
     children: jsxs(DialogContent, {
-      className: 'max-w-sm',
+      className: 'max-w-md',
       children: [
         jsxs(DialogHeader, {
           children: [
             jsx(DialogTitle, { children: 'Group settings' }),
             jsx(DialogDescription, {
-              children: 'Rename the group or set a room picture. Members and history are kept.'
+              children: 'Rename, picture, or add/remove bots. History is kept. The last bot is removed by Disband.'
             })
           ]
         }),
@@ -12512,6 +13665,97 @@ function GroupChatSettingsDialog({ group, members, open, onClose, onRenamed }) {
             value: name,
             onChange: event => setName(event.target.value)
           })
+        }),
+        jsxs('div', {
+          className: 'grid gap-1.5',
+          children: [
+            jsx('div', {
+              className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
+              children: `Bots · ${(members || []).length}/${GROUP_CHAT_MAX_MEMBERS}`
+            }),
+            jsx('div', {
+              className: 'grid gap-0.5',
+              children: (members || []).map(bot =>
+                jsxs('div', {
+                  className: 'flex items-center gap-2 rounded-md px-1.5 py-1',
+                  children: [
+                    jsx('span', {
+                      className: 'min-w-0 flex-1 truncate text-xs text-foreground',
+                      children: displayName(bot, botRosterMeta(bot, allMeta))
+                    }),
+                    jsx('button', {
+                      type: 'button',
+                      className:
+                        'shrink-0 text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-destructive',
+                      title: members.length <= 1 ? 'Disband the group to remove the last bot' : 'Remove from group',
+                      disabled: members.length <= 1,
+                      onClick: () => {
+                        void removeGroupChatMember(group, bot).then(result => {
+                          if (!result.ok && result.reason === 'last') {
+                            host.notify({ kind: 'info', message: 'Use Disband to remove the last bot.' })
+                          }
+                        })
+                      },
+                      children: 'Remove'
+                    })
+                  ]
+                }, `seat:${botRosterKey(bot)}`)
+              )
+            }),
+            atCap
+              ? jsx('div', {
+                  className: 'px-1 text-[0.65rem] text-(--ui-text-quaternary)',
+                  children: `Cap is ${GROUP_CHAT_MAX_MEMBERS} bots.`
+                })
+              : jsxs('div', {
+                  className: 'grid gap-1',
+                  children: [
+                    jsx(SearchField, {
+                      'aria-label': 'Add a bot',
+                      containerClassName: 'w-full',
+                      inputClassName: 'w-full',
+                      placeholder: 'Add a bot…',
+                      value: query,
+                      onChange: setQuery
+                    }),
+                    query.trim()
+                      ? jsx(ScrollArea, {
+                          className: 'max-h-36 min-h-0',
+                          children: jsx('div', {
+                            className: 'grid gap-0.5 pr-2',
+                            children: candidates.length
+                              ? candidates.slice(0, 12).map(bot =>
+                                  jsxs('button', {
+                                    type: 'button',
+                                    className:
+                                      'flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs transition-colors hover:bg-(--chrome-action-hover)',
+                                    title: 'Add to group',
+                                    onClick: () => {
+                                      void addGroupChatMember(group, bot)
+                                      setQuery('')
+                                    },
+                                    children: [
+                                      jsx('span', {
+                                        className: 'min-w-0 flex-1 truncate',
+                                        children: displayName(bot, botRosterMeta(bot, allMeta))
+                                      }),
+                                      jsx('span', {
+                                        className: 'shrink-0 text-[0.65rem] text-(--ui-text-quaternary)',
+                                        children: 'Add'
+                                      })
+                                    ]
+                                  }, `add:${botRosterKey(bot)}`)
+                                )
+                              : jsx('div', {
+                                  className: 'px-1.5 py-2 text-center text-[0.65rem] text-(--ui-text-quaternary)',
+                                  children: 'No matching bots to add.'
+                                })
+                          })
+                        })
+                      : null
+                  ]
+                })
+          ]
         }),
         jsxs(DialogFooter, {
           children: [
@@ -12781,6 +14025,87 @@ function assignLegacyThreads(log) {
     }
 
     return { ...entry, thread: current }
+  })
+}
+
+/** Group a room log into threads, newest last-activity first. */
+function listGroupThreads(room) {
+  const byId = new Map()
+
+  for (const entry of assignLegacyThreads(room?.log || [])) {
+    const id = groupThreadOf(entry)
+    let bucket = byId.get(id)
+
+    if (!bucket) {
+      bucket = { id, entries: [], preview: '', at: 0 }
+      byId.set(id, bucket)
+    }
+
+    bucket.entries.push(entry)
+    bucket.at = entry.at || bucket.at
+
+    if (!bucket.preview && entry.from?.kind === 'user') {
+      bucket.preview = stripPreviewMarkdown(entry.text || '').slice(0, 80)
+    }
+  }
+
+  return [...byId.values()].sort((a, b) => (b.at || 0) - (a.at || 0))
+}
+
+function groupThreadPreview(thread) {
+  if (!thread) {
+    return 'Thread'
+  }
+
+  if (thread.preview) {
+    return thread.preview
+  }
+
+  const head = thread.entries?.[0]
+
+  return stripPreviewMarkdown(head?.text || '').slice(0, 80) || 'Thread'
+}
+
+function hideGroupThread(group, thread) {
+  if (!thread) {
+    return
+  }
+
+  updateGroupChat(group, r => {
+    r.hiddenThreads = { ...(r.hiddenThreads || {}), [thread]: true }
+
+    if (r.activeThread === thread) {
+      const next = listGroupThreads(r).find(item => item.id !== thread && !r.hiddenThreads[item.id])
+      r.activeThread = next ? next.id : null
+    }
+
+    r.composingNew = false
+    return r
+  })
+}
+
+function showGroupThread(group, thread) {
+  if (!thread) {
+    return
+  }
+
+  updateGroupChat(group, r => {
+    if (r.hiddenThreads?.[thread]) {
+      const next = { ...r.hiddenThreads }
+      delete next[thread]
+      r.hiddenThreads = next
+    }
+
+    r.activeThread = thread
+    r.composingNew = false
+    return r
+  })
+}
+
+function startComposingNewThread(group) {
+  updateGroupChat(group, r => {
+    r.composingNew = true
+    return r
   })
 }
 
@@ -13229,9 +14554,147 @@ function migrateGroupComposerDraft(oldKey, newKey) {
   groupComposerDrafts.delete(oldKey)
 }
 
+function formatGroupThoughtSeconds(seconds) {
+  const n = Number(seconds)
+
+  if (!Number.isFinite(n) || n < 1) {
+    return null
+  }
+
+  if (n < 60) {
+    return `${Math.round(n)}s`
+  }
+
+  const minutes = Math.floor(n / 60)
+  const rest = Math.round(n % 60)
+
+  return rest ? `${minutes}m ${rest}s` : `${minutes}m`
+}
+
+function GroupTurnProgressChrome({ progress, live = false }) {
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    if (!live || !progress?.thinkingPending) {
+      return undefined
+    }
+
+    const id = setInterval(() => setNow(Date.now()), 1000)
+
+    return () => clearInterval(id)
+  }, [live, progress?.thinkingPending])
+
+  if (!progress) {
+    return null
+  }
+
+  const elapsed = live && progress.startedAt
+    ? Math.max(0, Math.round((now - progress.startedAt) / 1000))
+    : progress.thoughtSeconds
+  const thoughtFor = formatGroupThoughtSeconds(elapsed)
+  const nowLine = groupProgressNow(progress)
+  const summary = progress.summary && progress.summary !== 'is thinking…' && progress.summary !== nowLine ? progress.summary : ''
+  const thinkingText = String(progress.thinkingText || '').trim()
+  const steps = live && Array.isArray(progress.steps) ? progress.steps.filter(s => s?.text).slice(-6) : []
+
+  if (!nowLine && !summary && !thinkingText && !steps.length) {
+    return live
+      ? jsxs('div', {
+          className: 'flex items-center gap-1.5 text-[0.7rem] italic text-(--ui-text-quaternary)',
+          children: [
+            jsx(GlyphSpinner, { className: 'size-3' }),
+            jsx('span', { children: 'Heard you — working.' })
+          ]
+        })
+      : null
+  }
+
+  return jsxs('div', {
+    className: 'grid gap-0.5 text-[0.7rem] text-(--ui-text-tertiary)',
+    'data-slot': 'group-turn-progress',
+    children: [
+      nowLine
+        ? jsx('div', {
+            className: live ? 'shimmer font-medium text-(--ui-text-secondary)' : 'font-medium text-(--ui-text-secondary)',
+            'data-slot': 'group-turn-now',
+            children: nowLine
+          })
+        : null,
+      summary ? jsx('div', { className: live ? 'shimmer' : undefined, children: summary }) : null,
+      thoughtFor
+        ? jsx('div', { className: 'text-[0.65rem] text-(--ui-text-quaternary)', children: live ? thoughtFor : `Thought for ${thoughtFor}` })
+        : null,
+      steps.length
+        ? jsx('div', {
+            className: 'grid gap-0.5',
+            'data-slot': 'group-turn-steps',
+            children: steps.map((item, index) =>
+              jsx('div', { className: 'text-[0.65rem] text-(--ui-text-quaternary)', children: item.text }, item.at || index)
+            )
+          })
+        : null,
+      thinkingText
+        ? jsx('div', {
+            className: 'max-h-24 overflow-auto whitespace-pre-wrap text-[0.65rem] text-(--ui-text-quaternary)',
+            children: thinkingText.slice(-800)
+          })
+        : null
+    ]
+  })
+}
+
+function GroupTodoStack({ todos, live = false }) {
+  const [open, setOpen] = useState(true)
+  const list = Array.isArray(todos) ? todos.filter(t => t && t.status !== 'cancelled') : []
+
+  if (!list.length) {
+    return null
+  }
+
+  const done = list.filter(t => t.status === 'completed').length
+  const running = list.some(t => t.status === 'in_progress')
+
+  return jsxs('div', {
+    className: 'border-t border-(--ui-stroke-secondary)',
+    'data-slot': 'group-todo-stack',
+    children: [
+      jsxs('button', {
+        type: 'button',
+        className:
+          'flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[0.7rem] text-(--ui-text-secondary) hover:text-foreground',
+        'aria-expanded': open,
+        onClick: () => setOpen(value => !value),
+        children: [
+          jsx(Codicon, { name: 'checklist', className: 'text-[0.8rem]' }),
+          jsx('span', { children: `Tasks ${done}/${list.length}` }),
+          live && running ? jsx('span', { role: 'status', className: 'ml-1', children: jsx(GlyphSpinner, { className: 'size-3' }) }) : null,
+          jsx(Codicon, { name: open ? 'chevron-down' : 'chevron-right', className: 'ml-auto text-[0.65rem] text-(--ui-text-quaternary)' })
+        ]
+      }),
+      open
+        ? jsx('div', {
+            className: 'grid gap-0.5 px-2.5 pb-1.5',
+            children: list.map(item =>
+              jsxs('div', {
+                className: 'flex items-start gap-1.5 text-[0.7rem] text-(--ui-text-tertiary)',
+                children: [
+                  jsx(Codicon, {
+                    name: item.status === 'completed' ? 'pass-filled' : item.status === 'in_progress' ? 'sync' : 'circle-large-outline',
+                    className: cn('mt-0.5 shrink-0 text-[0.7rem]', item.status === 'completed' && 'text-(--ui-accent,#4f9cf9)')
+                  }),
+                  jsx('span', { className: 'min-w-0 flex-1', children: item.content })
+                ]
+              }, item.id)
+            )
+          })
+        : null
+    ]
+  })}
+
 function GroupChatWorkspace({ group, members, onBack, visible = true }) {
   const rooms = useValue($groupChats)
   const allMeta = useValue($botMeta)
+  const progressMap = useValue($groupTurnProgress)
   const room = rooms[group] || { log: [], running: false }
   const composerKey = groupComposerDraftKey(group, room)
   const composerKeyRef = useRef(composerKey)
@@ -13340,6 +14803,22 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
     wasVisibleRef.current = visible
   }, [visible])
 
+  useEffect(() => {
+    if (room.composingNew) {
+      return
+    }
+
+    if (room.activeThread && !(room.hiddenThreads || {})[room.activeThread]) {
+      return
+    }
+
+    const next = listGroupThreads(room).find(item => !(room.hiddenThreads || {})[item.id])
+
+    if (next) {
+      showGroupThread(group, next.id)
+    }
+  }, [group, room.activeThread, room.composingNew, room.log.length])
+
   const imagesFor = thread => pendingImages[thread ?? 'main'] || []
 
   const addImages = (thread, picked) => {
@@ -13447,6 +14926,14 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
           children: jsx(Codicon, { name: 'gear' })
         })
       }),
+      jsx(Button, {
+        variant: 'ghost',
+        size: 'sm',
+        className: 'shrink-0 text-(--ui-text-tertiary) hover:text-foreground',
+        title: `Group settings — rename, picture, or add/remove bots`,
+        onClick: () => setSettingsOpen(true),
+        children: jsx(Codicon, { name: 'gear' })
+      }),
       jsx(Tip, {
         label: `Disband the ${group} group chat`,
         children: jsx(Button, {
@@ -13481,6 +14968,15 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
     host.notify({ kind: 'success', message: `Stopped ${group} — remaining turns are held until you resume` })
   }
 
+  const turnMember = room.turn
+    ? members.find(m => m.name === room.turn || groupMemberKey(m) === room.turn) || { name: room.turn }
+    : null
+  const liveProgress = turnMember ? progressMap[groupProgressKey(group, turnMember)] : null
+  const activityHeadline = liveProgress?.summary && liveProgress.summary !== 'is thinking…'
+    ? `${groupSpeakerLabel(turnMember.name)} — ${liveProgress.summary}`
+    : latestActivity
+      ? `${groupActivityLabel(latestActivity)} · ${relativeTime(latestActivity.at)}`
+      : null
   const activityPanel = jsxs('div', {
     className: 'border-b border-(--ui-stroke-secondary)',
     children: [
@@ -13586,10 +15082,8 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
       main: '',
       pendingAttachments: { ...(current.pendingAttachments || {}), main: [] }
     }))
-    // Main composer = START A NEW THREAD with the whole group (Slack shape).
-    // Full descriptors ride into the turn loop: remote members keep their
-    // connection fields so their turns route to their own machines.
-    const minted = sendToGroupChat(group, memberDescriptors(), text, null, images)
+    const continueThread = !room.composingNew && room.activeThread && !room.endedThreads?.[room.activeThread]
+    const minted = sendToGroupChat(group, memberDescriptors(), text, continueThread ? room.activeThread : null, images)
 
     if (minted) {
       setOpenThreads(prev => ({ ...prev, [minted]: true }))
@@ -13772,9 +15266,10 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
                                 : null
                             ]
                           }),
+                          jsx(GroupTurnProgressChrome, { progress: entry.progress, live: false }),
                           jsx('div', {
                             className:
-                              'text-xs text-(--ui-text-secondary) [&_p]:mb-1 [&_p:last-child]:mb-0 [&_ul]:mb-1 [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:mb-1 [&_ol]:list-decimal [&_ol]:pl-4 [&_pre]:overflow-x-auto',
+                              'text-xs text-(--ui-text-secondary) [&_p]:mb-1 [&_p:last-child]:mb-0 [&_ul]:mb-1 [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:mb-1 [&_ol]:list-decimal [&_ol]:pl-4 [&_pre]:overflow-x-auto [&_table]:my-1 [&_table]:w-full [&_table]:text-[0.7rem] [&_img]:mt-1 [&_img]:max-h-64 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-(--ui-stroke-secondary)',
                             // The app shell sets user-select: none globally; message bodies opt
                             // back in so drag-select and ⌘C work in group chat logs.
                             'data-selectable-text': 'true',
@@ -13816,134 +15311,51 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
   // Threads: group entries by thread id (hydration assigned legacy ids, but
   // guard live pre-thread entries too), ordered by last activity — oldest
   // first, so the busiest/newest thread sits at the bottom by the composer.
-  // The most recently ACTIVE thread renders open; older ones collapse to a
-  // Slack-style summary row unless explicitly opened. Every open thread gets
-  // its own reply box, which continues THAT thread.
-  const threadsById = new Map()
-
-  for (let i = 0; i < room.log.length; i++) {
-    const entry = room.log[i]
-    const id = groupThreadOf(entry)
-    let bucket = threadsById.get(id)
-
-    if (!bucket) {
-      bucket = { entries: [], id, startIndex: i }
-      threadsById.set(id, bucket)
-    }
-
-    bucket.entries.push({ entry, index: i })
-  }
-
-  const threads = [...threadsById.values()].sort(
-    (a, b) => (a.entries[a.entries.length - 1].entry.at || 0) - (b.entries[b.entries.length - 1].entry.at || 0)
-  )
-  const newestThread = threads.length ? threads[threads.length - 1].id : null
+  // One thread in the chat box. Hidden threads stay in the Bots list.
+  const allThreads = listGroupThreads(room)
+  const hidden = room.hiddenThreads || {}
+  const activeId = room.activeThread && !hidden[room.activeThread] ? room.activeThread : null
+  const activeBucket = activeId ? allThreads.find(item => item.id === activeId) : null
+  const composingNew = Boolean(room.composingNew) || !activeId
+  const viewingEnded = Boolean(activeId && room.endedThreads?.[activeId])
   const logChildren = []
 
-  threads.forEach(threadBucket => {
-    const { entries, id } = threadBucket
-    const head = entries.find(({ entry }) => entry.from.kind === 'user')?.entry || entries[0].entry
-    const isNewest = id === newestThread
-    const expanded = openThreads[id] ?? isNewest
-
-    if (!expanded) {
-      const replies = entries.length - 1
-      const headText = stripPreviewMarkdown(head?.text || '').slice(0, 80)
-
-      logChildren.push(
-        jsxs('button', {
-          type: 'button',
-          className:
-            'flex w-full items-center gap-2 rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-left text-xs text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover)',
-          title: 'Open this thread',
-          onClick: () => setOpenThreads(prev => ({ ...prev, [id]: true })),
-          children: [
-            jsx(Codicon, { name: 'chevron-right', className: 'shrink-0 text-[0.65rem]' }),
-            jsx('span', { className: 'min-w-0 flex-1 truncate', children: headText || 'Thread' }),
-            jsx('span', {
-              className: 'shrink-0 text-[0.625rem] text-(--ui-text-quaternary)',
-              children: `${replies} ${replies === 1 ? 'reply' : 'replies'} · ${relativeTime(entries[entries.length - 1].entry.at)}`
-            })
-          ]
-        }, `fold:${id}`)
-      )
-
-      return
-    }
-
-    // Open thread: a rail-indented block — collapse affordance, its entries,
-    // and its own reply box (Slack's "reply in thread").
-    const threadRows = []
-
-    if (!isNewest || openThreads[id] !== undefined) {
-      threadRows.push(
-        jsxs('button', {
-          type: 'button',
-          className:
-            'flex w-full items-center gap-1.5 px-2 pt-1 text-left text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-foreground',
-          title: 'Collapse this thread',
-          onClick: () => setOpenThreads(prev => ({ ...prev, [id]: false })),
-          children: [jsx(Codicon, { name: 'chevron-down', className: 'text-[0.6rem]' }), 'Collapse thread']
-        }, `unfold:${id}`)
-      )
-    }
-
-    for (const { entry, index } of entries) {
-      threadRows.push(renderEntry(entry, index))
-    }
-
-    // Reply-in-thread: the newest thread's continuation ALSO lives here, so
-    // the main composer below can stay "new thread" without ambiguity.
-    threadRows.push(
-      replyThread === id
-        ? jsxs('form', {
-            className: 'grid gap-0 px-2 pb-1',
-            onSubmit: event => {
-              event.preventDefault()
-              submitReply(id)
-            },
-            children: [
-              attachmentRow(id),
-              jsxs('div', {
-                className: 'flex items-center gap-1.5',
-                children: [
-                  jsx(GroupMentionInput, {
-                    'aria-label': 'Reply in thread',
-                    autoFocus: true,
-                    placeholder: 'Reply in thread…',
-                    members,
-                    value: replyDrafts[id] || '',
-                    onChange: text => setReplyDrafts(prev => ({ ...prev, [id]: text })),
-                    onSubmitDraft: () => submitReply(id),
-                    onPaste: event => pasteImages(id, event)
-                  }),
-                  attachButton(id),
-                  jsx(Button, {
-                    type: 'submit',
-                    size: 'sm',
-                    disabled: !(replyDrafts[id] || '').trim() && !imagesFor(id).length,
-                    children: 'Reply'
-                  })
-                ]
-              })
-            ]
-          }, `replybox:${id}`)
-        : jsx('button', {
+  if (activeBucket && !composingNew) {
+    const id = activeBucket.id
+    logChildren.push(
+      jsxs('div', {
+        className: 'flex w-full items-center gap-2 px-2 pt-1',
+        children: [
+          jsxs('button', {
             type: 'button',
             className:
-              'w-fit px-2 pb-1 text-left text-[0.65rem] text-(--ui-accent,#4f9cf9) transition-colors hover:underline',
-            onClick: () => setReplyThread(id),
-            children: 'Reply in thread'
-          }, `replylink:${id}`)
+              'flex items-center gap-1.5 text-left text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-foreground',
+            title: 'Close this thread',
+            onClick: () => hideGroupThread(group, id),
+            children: [jsx(Codicon, { name: 'close', className: 'text-[0.6rem]' }), 'Close']
+          }),
+          viewingEnded
+            ? jsx('span', { className: 'text-[0.65rem] text-(--ui-text-quaternary)', children: 'Ended' })
+            : jsxs('button', {
+                type: 'button',
+                className:
+                  'flex items-center gap-1 text-left text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-destructive',
+                title: 'End this thread — stop replies and hide it',
+                onClick: () => endGroupThread(group, id),
+                children: [jsx(Codicon, { name: 'debug-stop', className: 'text-[0.6rem]' }), 'End']
+              }),
+          jsx('span', {
+            className: 'min-w-0 flex-1 truncate text-[0.65rem] text-(--ui-text-quaternary)',
+            children: groupThreadPreview(activeBucket)
+          })
+        ]
+      }, `threadbar:${id}`)
     )
 
-    logChildren.push(
-      jsx('div', {
-        className: 'grid gap-1.5 border-l-2 border-(--ui-stroke-secondary) pl-1.5',
-        children: threadRows
-      }, `thread:${id}`)
-    )
-  })
+    activeBucket.entries.forEach((entry, index) => {
+      logChildren.push(renderEntry(entry, index))
+    })
+  }
 
   return jsxs('div', {
     className: 'relative flex h-full flex-col',
@@ -13966,7 +15378,7 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
         ? jsx('div', {
             className:
               'pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-(--ui-accent,#4f9cf9) text-sm font-medium text-(--ui-accent,#4f9cf9)',
-            children: replyThread ? 'Drop to attach to this thread reply' : 'Drop to attach — every responding bot sees it'
+            children: replyThread ? 'Drop to attach to this thread reply' : composingNew ? 'Drop to attach — starts a new thread' : 'Drop to attach to this thread'
           }, 'dropzone')
         : null,
       header,
@@ -13981,20 +15393,20 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
               : [
                   jsx('div', {
                     className: 'px-2 py-4 text-center text-xs text-(--ui-text-tertiary)',
-                    children: 'Say something — every bot in this group hears the room.'
+                    children: composingNew
+                      ? allThreads.length
+                        ? 'New thread — send to start it, or pick an existing one in the Bots list.'
+                        : 'Say something — every bot in this group hears the room.'
+                      : 'Pick a thread in the Bots list, or start a new one.'
                   }, 'empty')
                 ]),
             ...roomClarifies.map(entry =>
               jsx(GroupClarifyCard, { entry, members }, `clarify:${entry.memberKey}:${entry.requestId}`)
             ),
-            room.running
+            room.running && roomClarifies.length
               ? jsx('div', {
                   className: 'px-2 py-1 text-[0.7rem] italic text-(--ui-text-quaternary)',
-                  children: roomClarifies.length
-                    ? 'Waiting for your answer…'
-                    : room.turn
-                      ? `${groupSpeakerLabel(room.turn)} is thinking…`
-                      : 'The room is working…'
+                  children: 'Waiting for your answer…'
                 }, 'working')
               : null,
             // Scroll anchor (#89835): rooms opened at scroll position 0, mid-
@@ -14004,39 +15416,91 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
           ]
         })
       }),
-      jsx('div', {
-        className: 'border-t border-(--ui-stroke-secondary) p-2',
-        children: jsxs('form', {
+      jsxs('div', {
+        className: 'border-t border-(--ui-stroke-secondary)',
+        children: [
+          room.running && !roomClarifies.length
+            ? jsxs('div', {
+                className: 'grid gap-1 px-2.5 pt-2',
+                'data-slot': 'group-live-turn',
+                children: [
+                  jsx('div', {
+                    className: 'text-[0.7rem] font-medium text-(--ui-text-secondary)',
+                    children: turnMember
+                      ? `${groupSpeakerLabel(turnMember.name)} — ${liveProgress?.now || groupProgressNow(liveProgress) || 'on it'}`
+                      : 'The room is working…'
+                  }),
+                  jsx(GroupTurnProgressChrome, { progress: liveProgress, live: true })
+                ]
+              })
+            : null,
+          jsx(GroupTodoStack, { todos: liveProgress?.todos, live: Boolean(room.running) }),
+          jsx('div', {
+            className: 'p-2',
+            children: jsxs('form', {
           className: 'grid gap-0',
           onSubmit: event => {
             event.preventDefault()
             submit()
           },
           children: [
-            attachmentRow(null),
+            composingNew || !viewingEnded
+              ? attachmentRow(null)
+              : null,
             jsxs('div', {
               className: 'flex items-center gap-1.5',
               children: [
-                jsx(GroupMentionInput, {
-                  'aria-label': `Message ${group}`,
-                  placeholder: `New thread in ${group}… (@name to direct, @everyone for all)`,
-                  members,
-                  value: draft,
-                  onChange: setDraft,
-                  onSubmitDraft: submit,
-                  onPaste: event => pasteImages(null, event)
-                }),
-                attachButton(null),
-                jsx(Button, {
-                  type: 'submit',
-                  size: 'sm',
-                  disabled: !draft.trim() && !imagesFor(null).length,
-                  children: 'New Thread'
-                })
+                composingNew
+                  ? null
+                  : jsx('button', {
+                      type: 'button',
+                      className:
+                        'shrink-0 px-1.5 text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-foreground',
+                      title: 'Start a new thread',
+                      onClick: () => startComposingNewThread(group),
+                      children: 'New'
+                    }),
+                composingNew && activeId
+                  ? jsx('button', {
+                      type: 'button',
+                      className:
+                        'shrink-0 px-1.5 text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-foreground',
+                      title: 'Back to the current thread',
+                      onClick: () => showGroupThread(group, activeId),
+                      children: 'Back'
+                    })
+                  : null,
+                viewingEnded && !composingNew
+                  ? jsx('div', {
+                      className: 'min-w-0 flex-1 px-1 text-xs text-(--ui-text-quaternary)',
+                      children: 'This thread has ended.'
+                    })
+                  : jsx(GroupMentionInput, {
+                      'aria-label': composingNew ? `New thread in ${group}` : `Reply in ${group}`,
+                      placeholder: composingNew
+                        ? `New thread in ${group}… (@name to direct, @everyone for all)`
+                        : 'Reply in thread… (@name to direct, @everyone for all)',
+                      members,
+                      value: draft,
+                      onChange: setDraft,
+                      onSubmitDraft: submit,
+                      onPaste: event => pasteImages(null, event)
+                    }),
+                viewingEnded && !composingNew ? null : attachButton(null),
+                viewingEnded && !composingNew
+                  ? null
+                  : jsx(Button, {
+                      type: 'submit',
+                      size: 'sm',
+                      disabled: !draft.trim() && !imagesFor(null).length,
+                      children: composingNew ? 'New Thread' : 'Reply'
+                    })
               ]
             })
           ]
         })
+      }),
+        ]
       }),
       jsx(GroupChatSettingsDialog, {
         group,
@@ -14104,6 +15568,13 @@ function dropGroupMainTab(group) {
  *  highlights. Callers must subscribe to `$groupMainTabsRev` (BotsPane does)
  *  so ownership changes re-run this gate. */
 function shouldRenderGroupChatInPane(group) {
+  // Main-window door exists: the room NEVER replaces the Bots roster.
+  // A throwing openWorkspace used to fall through to in-pane while the
+  // tab still painted — two live surfaces, independent drafts (#89788+).
+  if (typeof host.openWorkspace === 'function') {
+    return false
+  }
+
   return Boolean(group && !groupChatMainTabs.has(group))
 }
 
@@ -14631,11 +16102,18 @@ function openGroupChat(group) {
 
       return
     } catch {
-      // Fall through to the in-panel room below.
+      host.notify?.({
+        kind: 'error',
+        message: `Could not open “${group}” in the chat window.`
+      })
+      // Highlight the roster row only — never steal the Bots list.
+      $groupChatWorkspace.set(group)
+
+      return
     }
   }
 
-  // No main-window door (older desktop) or it threw: select the group so
+  // No main-window door (older desktop): select the group so
   // the in-panel room renders as the fallback surface.
   $groupChatWorkspace.set(group)
 }
@@ -14906,9 +16384,9 @@ function BotsPane() {
   }, [gatewayFilterExists])
 
   const activeSourceRoster = roster.filter(bot => !bot.remoteSource)
-  // Hidden rows remain fully alive and recoverable at the bottom. Every
-  // non-display consumer continues to receive the complete roster.
   const hiddenExpanded = useValue($showHiddenBots)
+  const showHiddenThreads = useValue($showHiddenThreads)
+  const unreadByName = useValue($botUnread)
   const hiddenBots = roster.filter(bot => isBotHidden(bot, allMeta))
   const visibleRoster = roster.filter(bot => !isBotHidden(bot, allMeta))
   const gatewayRoster = filterBotsByGateway(visibleRoster, gatewayFilter)
@@ -15523,7 +17001,119 @@ function BotsPane() {
                       ]
                     })
                   }),
-      jsx(CreateAgentDialog, {
+      groupRows.length || Object.keys(groupRooms).length
+        ? jsxs('div', {
+            className: 'flex max-h-[38%] min-h-[5.5rem] flex-col border-t border-(--ui-stroke-secondary)',
+            children: [
+              jsxs('div', {
+                className: 'flex items-center justify-between px-2.5 pt-1.5 pb-1',
+                children: [
+                  jsx('span', {
+                    className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
+                    children: showHiddenThreads ? 'Hidden threads' : 'Threads'
+                  }),
+                  jsxs('div', {
+                    className: 'flex items-center gap-2',
+                    children: [
+                      jsx('button', {
+                        type: 'button',
+                        className: cn(
+                          'text-[0.65rem] transition-colors',
+                          showHiddenThreads ? 'text-foreground' : 'text-(--ui-text-quaternary) hover:text-foreground'
+                        ),
+                        title: showHiddenThreads ? 'Back to live threads' : 'Show hidden threads',
+                        'aria-pressed': showHiddenThreads,
+                        onClick: () => $showHiddenThreads.set(!showHiddenThreads),
+                        children: 'Hidden'
+                      }),
+                      groupChatName
+                        ? jsx('button', {
+                            type: 'button',
+                            className:
+                              'text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-foreground',
+                            title: 'Start a new thread',
+                            onClick: () => {
+                              openGroupChat(groupChatName)
+                              startComposingNewThread(groupChatName)
+                            },
+                            children: 'New'
+                          })
+                        : null
+                    ]
+                  })
+                ]
+              }),
+              jsx(ScrollArea, {
+                className: 'min-h-0 flex-1',
+                children: jsx('div', {
+                  className: 'grid w-full min-w-0 gap-0.5 px-1.5 pb-2',
+                  children: (() => {
+                    const focusGroup = groupChatName
+                      || groupChatNames(allMeta, groupRooms)
+                        .map(name => ({ name, activity: groupLastActivity(groupRooms[name]) }))
+                        .sort((a, b) => b.activity - a.activity)[0]?.name
+                    const focusRoom = focusGroup ? groupRooms[focusGroup] : null
+                    const listed = (focusRoom ? listGroupThreads(focusRoom) : []).filter(thread => {
+                      const hidden = Boolean(focusRoom.hiddenThreads?.[thread.id])
+                      return showHiddenThreads ? hidden : !hidden
+                    })
+
+                    if (!listed.length) {
+                      return jsx('div', {
+                        className: 'px-2 py-2 text-[0.65rem] text-(--ui-text-quaternary)',
+                        children: !focusGroup
+                          ? 'Open a group to see its threads.'
+                          : showHiddenThreads
+                            ? 'No hidden threads.'
+                            : `No threads in ${focusGroup} yet.`
+                      })
+                    }
+
+                    return listed.map(thread => {
+                      const hidden = Boolean(focusRoom.hiddenThreads?.[thread.id])
+                      const ended = Boolean(focusRoom.endedThreads?.[thread.id])
+                      const active = groupChatName === focusGroup && focusRoom.activeThread === thread.id && !focusRoom.composingNew
+
+                      return jsxs('button', {
+                        type: 'button',
+                        title: hidden ? 'Open hidden thread' : ended ? 'Open ended thread' : 'Open thread',
+                        className: cn(
+                          'flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-(--chrome-action-hover)',
+                          active ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary)'
+                        ),
+                        onClick: () => {
+                          openGroupChat(focusGroup)
+                          showGroupThread(focusGroup, thread.id)
+                          if (hidden) {
+                            $showHiddenThreads.set(false)
+                          }
+                        },
+                        children: [
+                          jsx(Codicon, { name: hidden ? 'eye-closed' : 'comment-discussion', className: 'shrink-0 text-[0.7rem]' }),
+                          jsx('span', { className: 'min-w-0 flex-1 truncate', children: groupThreadPreview(thread) }),
+                          ended
+                            ? jsx('span', { className: 'shrink-0 text-[0.6rem] text-(--ui-text-quaternary)', children: 'Ended' })
+                            : hidden
+                              ? jsx('span', { className: 'shrink-0 text-[0.6rem] text-(--ui-text-quaternary)', children: 'Hidden' })
+                              : null
+                        ]
+                      }, `thread-row:${focusGroup}:${thread.id}`)
+                    })
+                  })()
+                })
+              })
+            ]
+          })
+        : null,
+      jsx('div', {
+        className: 'border-t border-(--ui-stroke-secondary) p-2',
+        children: jsxs(Button, {
+          className: 'w-full justify-center gap-1.5',
+          variant: 'secondary',
+          onClick: () => setCreateOpen(true),
+          children: [jsx(Codicon, { name: 'add' }), 'New Agent']
+        })
+      }),      jsx(CreateAgentDialog, {
         open: createOpen,
         onClose: () => {
           setCreateOpen(false)
@@ -15617,6 +17207,18 @@ export default {
     if (typeof ctx.onDispose === 'function') {
       ctx.onDispose(stopFaceClock)
       ctx.onDispose(stopBotRelay)
+    }
+
+    if (typeof host.onEvent === 'function') {
+      const offStart = host.onEvent('tool.start', event => applyGroupToolEvent('start', event))
+      const offDone = host.onEvent('tool.complete', event => applyGroupToolEvent('complete', event))
+
+      if (typeof ctx.onDispose === 'function') {
+        ctx.onDispose(() => {
+          offStart?.()
+          offDone?.()
+        })
+      }
     }
 
     // @-mention autocomplete: typing "@rese…" in ANY composer offers the
@@ -15755,6 +17357,9 @@ export default {
                   roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
                   image: typeof room.image === 'string' && room.image ? room.image : null,
                   syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+                  endedThreads: room.endedThreads && typeof room.endedThreads === 'object' ? room.endedThreads : {},
+                  hiddenThreads: room.hiddenThreads && typeof room.hiddenThreads === 'object' ? room.hiddenThreads : {},
+                  activeThread: typeof room.activeThread === 'string' && room.activeThread ? room.activeThread : null,
                   epoch: 0,
                   running: false
                 }
@@ -15804,6 +17409,58 @@ export default {
       /* no storage — rooms start empty */
     }
 
+    const pullWebuiRooms = () => {
+      // File-only. Never fetch /api/bots/push — that dump was an exfil.
+      readDesktopFileText(GROUP_CHATS_FILE).then(text => {
+          if (!text) return
+          const data = JSON.parse(text)
+          const incoming = data && data.groups
+          if (!incoming || typeof incoming !== 'object') return
+          const all = { ...$groupChats.get() }
+          let changed = false
+          for (const [name, room] of Object.entries(incoming)) {
+            if (!room || room.tombstone || !Array.isArray(room.log) || !room.log.length) continue
+            const local = all[name] || { log: [], watermarks: {}, epoch: 0, running: false, members: [] }
+            const seen = new Set((local.log || []).map(e => `${e.at}|${e.thread}|${e.text}`))
+            const extra = room.log.filter(e => e && !seen.has(`${e.at}|${e.thread}|${e.text}`))
+            if (!extra.length) continue
+            changed = true
+            all[name] = {
+              ...local,
+              log: [...(local.log || []), ...extra].sort((a, b) => (a.at || 0) - (b.at || 0)),
+              members: local.members && local.members.length ? local.members : (room.members || [])
+            }
+          }
+          if (!changed) return
+          $groupChats.set(all)
+          try {
+            const durable = {}
+            for (const [name, room] of Object.entries(all)) {
+              if (room.tombstone) continue
+              durable[name] = {
+                log: room.log,
+                watermarks: room.watermarks || {},
+                sessions: room.sessions || {},
+                stranded: room.stranded || {},
+                members: Array.isArray(room.members) ? room.members : [],
+                roomId: room.roomId || null,
+                image: room.image || null,
+                endedThreads: room.endedThreads || {},
+                hiddenThreads: room.hiddenThreads || {},
+                activeThread: room.activeThread || null
+              }
+            }
+            Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durable)).catch(() => undefined)
+            persistGroupChatsFile(durable)
+          } catch {
+            /* persist best-effort */
+          }
+        })
+        .catch(() => undefined)
+    }
+    pullWebuiRooms()
+    const webuiPullTimer = setInterval(pullWebuiRooms, 2500)
+
     // Routines follow the chat you're in: track the focused chat's owner
     // profile (falls back to the live gateway profile on older desktops —
     // see $focusedBotProfile). Keying this off the socket's home alone left
@@ -15840,6 +17497,7 @@ export default {
     if (typeof ctx.onDispose === 'function') {
       ctx.onDispose(() => {
         stopGroupChatServerSync()
+        clearInterval(webuiPullTimer)
         if (typeof unbindProfileListener === 'function') {
           unbindProfileListener()
         }

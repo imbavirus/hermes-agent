@@ -306,50 +306,39 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml_seen["text"]
     assert "<RestartOnFailure>" in xml_seen["text"]
     assert "<Count>999</Count>" in xml_seen["text"]
-    # Scheduled Task launches the console-less .vbs via wscript.exe, never cmd.exe
-    # (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A).
-    assert "<Command>wscript.exe</Command>" in xml_seen["text"]
-    assert "//B //Nologo" in xml_seen["text"]
-    assert "Hermes_Gateway_alice.vbs" in xml_seen["text"]
+    # Scheduled Task leftover helper must never invoke wscript/VBS.
+    assert "wscript.exe" not in xml_seen["text"]
+    assert ".vbs" not in xml_seen["text"]
     assert "cmd.exe" not in xml_seen["text"]
+    assert "Hermes_Gateway_alice_svc.py" in xml_seen["text"]
 
 
-def test_gateway_vbs_script_is_console_less(monkeypatch):
-    """The .vbs launcher must avoid cmd.exe entirely and Run pythonw hidden
-    (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A)."""
-    monkeypatch.setattr(
-        gateway_windows,
-        "_resolve_detached_python",
-        lambda exe: (r"C:\venv\Scripts\pythonw.exe", Path(r"C:\venv"), []),
-    )
-    content = gateway_windows._build_gateway_vbs_script(
-        r"C:\venv\Scripts\python.exe",
-        r"C:\Hermes",
-        r"C:\Hermes",
-        "--profile work",
-    )
-    assert "cmd.exe" not in content.lower()
-    assert 'CreateObject("WScript.Shell")' in content
-    assert "pythonw.exe" in content
-    assert "hermes_cli.main" in content
-    assert "gateway run" in content
-    assert ", 0, False" in content  # hidden window, detached/async
-    for var in ("HERMES_HOME", "PYTHONIOENCODING", "HERMES_GATEWAY_DETACHED", "VIRTUAL_ENV", "PYTHONPATH"):
-        assert var in content
-    assert "--profile" in content and "work" in content
-    assert content.endswith("\r\n")
+def test_gateway_vbs_script_is_forbidden():
+    """Hard rule: Hermes must never generate VBS autorun launchers."""
+    with pytest.raises(RuntimeError, match="never write VBS"):
+        gateway_windows._build_gateway_vbs_script(
+            "C:/venv/Scripts/python.exe",
+            "C:/Hermes",
+            "C:/Hermes",
+            "--profile work",
+        )
+    with pytest.raises(RuntimeError, match="never write VBS"):
+        gateway_windows._build_startup_launcher(Path("C:/Hermes/Hermes_Gateway.cmd"))
 
 
+def test_scm_spec_roundtrip(tmp_path):
+    from hermes_cli.windows_gateway_svc import dump_spec, load_spec, render_scm_host, spec_path_for_host
 
-
-
-
-
-
-
-
-
-
+    host = tmp_path / "Hermes_Gateway_dev_svc.py"
+    spec_path = spec_path_for_host(host)
+    assert spec_path.name == "Hermes_Gateway_dev.scm.json"
+    dump_spec(spec_path, {"argv": ["python.exe", "-m", "hermes_cli.main", "gateway", "run"], "cwd": "C:/x"})
+    data = load_spec(spec_path)
+    assert data["argv"][-2:] == ["gateway", "run"]
+    host_src = render_scm_host("C:/Users/imba/AppData/Local/hermes/hermes-agent")
+    assert "windows_gateway_svc import main" in host_src
+    assert ".vbs" not in host_src
+    assert "wscript" not in host_src.lower()
 
 
 # ---------------------------------------------------------------------------

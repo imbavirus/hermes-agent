@@ -400,6 +400,95 @@ def _sanitize_tools_non_ascii(tools: list) -> bool:
     return _sanitize_structure_non_ascii(tools)
 
 
+_IMAGE_PART_TYPES = frozenset({"image_url", "image", "input_image"})
+
+# Native vision tool results embed full base64 images into history. Providers
+# like xAI enforce HTTP 413 on *byte* payload size, while Hermes' token
+# estimator charges only ~1500 tokens/image. Stacking dozens of screenshots
+# (Radiant QA fan-out, browser captures, etc.) therefore 413s long before the
+# context compressor thinks anything is wrong. Keep only the newest N image-
+# bearing tool messages; older ones collapse to their text parts.
+DEFAULT_RETAINED_TOOL_IMAGES = 2
+
+
+def _content_has_image_parts(content: Any) -> bool:
+    if isinstance(content, list):
+        return any(
+            isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+            for part in content
+        )
+    if isinstance(content, dict) and content.get("_multimodal") is True:
+        return _content_has_image_parts(content.get("content"))
+    return False
+
+
+def _text_from_image_bearing_content(content: Any) -> str:
+    """Collapse list / multimodal content to plain text (images dropped)."""
+    if isinstance(content, dict) and content.get("_multimodal") is True:
+        summary = content.get("text_summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+        content = content.get("content")
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                if isinstance(part, str) and part.strip():
+                    texts.append(part.strip())
+                continue
+            if part.get("type") in {"text", "input_text"}:
+                text = str(part.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+        if texts:
+            return "\n\n".join(texts)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    return (
+        "[image content demoted — only the newest vision payloads are retained "
+        "so the request stays under provider size limits]"
+    )
+
+
+def _demote_message_images_to_text(msg: dict) -> bool:
+    """Replace image-bearing content on one message with text-only. Returns True if changed."""
+    content = msg.get("content")
+    if not _content_has_image_parts(content):
+        return False
+    msg["content"] = _text_from_image_bearing_content(content)
+    return True
+
+
+def demote_stale_tool_images(
+    messages: list,
+    *,
+    keep_last: int = DEFAULT_RETAINED_TOOL_IMAGES,
+) -> int:
+    """Demote older image-bearing tool results to text, keeping the newest ``keep_last``.
+
+    Mutates ``messages`` in place. Returns the number of messages demoted.
+    Non-tool roles (user attachments) are left alone — those are handled by
+    ``_strip_images_from_messages`` on provider rejection / 413 recovery.
+    """
+    if not isinstance(messages, list) or keep_last < 0:
+        return 0
+    image_idxs = [
+        i
+        for i, msg in enumerate(messages)
+        if isinstance(msg, dict)
+        and msg.get("role") == "tool"
+        and _content_has_image_parts(msg.get("content"))
+    ]
+    if len(image_idxs) <= keep_last:
+        return 0
+    demote_idxs = image_idxs if keep_last == 0 else image_idxs[:-keep_last]
+    demoted = 0
+    for i in demote_idxs:
+        if _demote_message_images_to_text(messages[i]):
+            demoted += 1
+    return demoted
+
+
 def _strip_images_from_messages(messages: list) -> bool:
     """Remove image_url content parts from all messages in-place.
 
@@ -424,11 +513,17 @@ def _strip_images_from_messages(messages: list) -> bool:
         if not isinstance(msg, dict):
             continue
         content = msg.get("content")
+        # Multimodal envelope still sitting on the message (pre-unwrap).
+        if isinstance(content, dict) and content.get("_multimodal") is True:
+            if _content_has_image_parts(content):
+                msg["content"] = _text_from_image_bearing_content(content)
+                found = True
+            continue
         if not isinstance(content, list):
             continue
         new_parts = []
         for part in content:
-            if isinstance(part, dict) and part.get("type") in {"image_url", "image", "input_image"}:
+            if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES:
                 found = True
             else:
                 new_parts.append(part)
@@ -489,6 +584,8 @@ __all__ = [
     "_sanitize_messages_non_ascii",
     "_sanitize_tools_non_ascii",
     "_strip_images_from_messages",
+    "demote_stale_tool_images",
+    "DEFAULT_RETAINED_TOOL_IMAGES",
     "_sanitize_structure_non_ascii",
     # call_id policy owners (F4 consolidation)
     "deterministic_call_id",

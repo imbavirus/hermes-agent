@@ -6683,7 +6683,12 @@ def _refresh_windows_gateway_launchers() -> None:
     """Regenerate installed Windows gateway launcher scripts after update.
 
     The Scheduled Task / Startup-folder launchers (``gateway.cmd`` +
-    ``gateway.vbs``) are persistence artifacts written once at install time —
+    ``*_svc.py`` / ``*.scm.json``) are persistence artifacts written once at
+    install time. ``_write_task_script`` is idempotent, never writes VBS, and
+    deletes leftover ``.vbs`` droppers. The task's /TR or SCM binPath points
+    at a stable script path, so rewriting the files in place retargets
+    persistence without UAC. Best-effort: a failed refresh must never fail
+    the update.
     ``hermes update`` never touched them, so installs created before the
     hidden-console rework (aa2ae36c3f) kept launching the gateway through
     ``pythonw.exe`` forever: every descendant spawn flashed a conhost

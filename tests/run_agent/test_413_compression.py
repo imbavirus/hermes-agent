@@ -179,12 +179,13 @@ class TestHTTP413Compression:
 
 
     def test_413_strips_vision_payloads_when_compression_cannot_reduce_messages(self, agent):
-        """If compression leaves image payloads behind, strip them and retry.
+        """413 must evict vision payloads from canonical history, not only the wire copy.
 
-        Browser vision tool results can contain base64 image parts. A 413 can
-        persist even after summarisation when the remaining recent tool result
-        still carries binary data; Hermes should evict the image payload and
-        keep the text/placeholder context instead of failing immediately.
+        Browser / native vision tool results embed base64 image parts. A 413 is
+        often a *byte* size limit (xAI), so recovery must strip images from the
+        durable ``messages`` list. Stripping only ``api_messages`` left the next
+        outer-loop rebuild re-injecting every screenshot and burning the
+        compression budget.
         """
         err_413 = _make_413_error()
         ok_resp = _mock_response(content="Recovered after image eviction", finish_reason="stop")
@@ -232,12 +233,11 @@ class TestHTTP413Compression:
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            # Simulate the bad production case: compression ran, but the
-            # recent vision tool message survived so message count did not drop.
+            # Compression must not be required when images alone explain the 413.
             mock_compress.side_effect = lambda msgs, *_a, **_k: (msgs, "compressed prompt")
             result = agent.run_conversation("continue", conversation_history=prefill)
 
-        mock_compress.assert_called_once()
+        mock_compress.assert_not_called()
         assert result["completed"] is True
         assert result["final_response"] == "Recovered after image eviction"
         assert len(request_payloads) == 2
@@ -246,6 +246,9 @@ class TestHTTP413Compression:
         assert "Screenshot of the dashboard" in str(first_tool["content"])
         assert "data:image" not in str(retried_tool["content"])
         assert "Screenshot of the dashboard" in str(retried_tool["content"])
+        # Canonical history must stay stripped so the next rebuild cannot re-embed.
+        hist_tool = next(m for m in result["messages"] if m.get("role") == "tool")
+        assert "data:image" not in str(hist_tool.get("content"))
         assert not getattr(agent, "_no_list_tool_content_models", set())
 
     def test_413_clears_conversation_history_on_persist(self, agent):
