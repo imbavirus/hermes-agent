@@ -517,6 +517,33 @@ test('self-mention does not leave the speaker owed another turn', () => {
   )
 })
 
+test('Heard @ack chrome does not mint mention debt (ComfyUI ping-pong)', () => {
+  const gc = load(() => '(pass)')
+  const seated = [{ name: 'dev', title: '' }, { name: 'tester', title: '' }]
+  const log = [
+    { from: { kind: 'user', name: 'You' }, text: 'hold until I pick RAM', at: 1 },
+    { from: { kind: 'member', name: 'tester' }, text: 'Heard @dev — **holding.** No POST until @user picks.', at: 2 },
+    { from: { kind: 'member', name: 'dev' }, text: 'Heard @tester — holding with you. Door stays down. Waiting on @user.', at: 3 },
+    { from: { kind: 'member', name: 'tester' }, text: 'Heard @dev — still **holding**. No POST until @user picks.', at: 4 }
+  ]
+  const owed = gc.membersOwedMentionTurn(log, seated)
+
+  assert.equal(owed.length, 0, `Heard @ ack ping-pong owed ${owed.map(m => m.name).join(',')}`)
+})
+
+test('Heard @ack still forwards a real body @tag', () => {
+  const gc = load(() => '(pass)')
+  const seated = [{ name: 'dev', title: '' }, { name: 'tester', title: '' }, { name: 'builder', title: '' }]
+  const log = [
+    { from: { kind: 'user', name: 'You' }, text: '@tester status', at: 1 },
+    { from: { kind: 'member', name: 'tester' }, text: 'Heard @dev — @builder please verify the 70% gate.', at: 2 }
+  ]
+  const owed = gc.membersOwedMentionTurn(log, seated)
+
+  assert.equal(owed.some(m => m.name === 'dev'), false, 'Heard @dev prefix must not owe dev')
+  assert.equal(owed.some(m => m.name === 'builder'), true, 'body @builder must still owe builder')
+})
+
 test('mention parse: email@dev.com is not a @dev tag', () => {
   const gc = load(() => '(pass)')
   const seated = [...MEMBERS, { name: 'dev', title: '' }]

@@ -7326,6 +7326,12 @@ function entryIsFromMember(entry, member) {
   return !member.remoteSource
 }
 
+/** Drop the required live-ack prefix `Heard @name —` so spoken chrome cannot
+ *  mint pull-in debt. A body @tag after the dash still counts. */
+function groupMentionDebtText(text) {
+  return String(text || '').replace(/^\s*Heard @[a-z0-9][a-z0-9._-]*\b[ \t]*[—–\-:]*[ \t]*/i, '')
+}
+
 /** Members explicitly @-mentioned since the last user message who have not
  *  posted AFTER that mention. Unlike resolveGroupResponders this never
  *  expands to "everyone" — it is the pull-in debt a last-round or harvested
@@ -7343,7 +7349,7 @@ function membersOwedMentionTurn(log, members) {
   const lastMentionAt = new Map()
 
   for (let i = 0; i < sinceLastUser.length; i++) {
-    const parsed = parseGroupChatMentions(sinceLastUser[i].text, members)
+    const parsed = parseGroupChatMentions(groupMentionDebtText(sinceLastUser[i].text), members)
 
     for (const key of parsed.mentioned) {
       lastMentionAt.set(key, i)
@@ -9139,7 +9145,7 @@ function unaddressedGroupMentions(group, members, thread) {
   const citedAt = new Map()
 
   for (const entry of log) {
-    const parsed = parseGroupChatMentions(entry.text || '', members)
+    const parsed = parseGroupChatMentions(groupMentionDebtText(entry.text || ''), members)
 
     // A user send re-drives everyone anyway; only member-to-member handoffs
     // can strand here.
