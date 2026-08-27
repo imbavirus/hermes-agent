@@ -173,3 +173,19 @@ def test_unlock_packaged_desktop_kills_hermes_exe(tmp_path, monkeypatch):
     update_cmd._unlock_packaged_desktop_for_rebuild(desktop_dir)
     assert calls
     assert calls[0][:3] == ["taskkill", "/IM", "Hermes.exe"]
+
+
+def test_asar_missing_infernos_bots_when_sentinel_only_in_source(tmp_path):
+    asar = tmp_path / "app.asar"
+    plugin = tmp_path / "plugin.js"
+    plugin.write_bytes(b"function membersOwedMentionTurn(log, members) {}\n")
+    asar.write_bytes(b"stock nous plugin without infernos chrome\n")
+    assert hm._asar_missing_infernos_bots(asar, plugin) is True
+
+
+def test_asar_missing_infernos_bots_false_when_packed(tmp_path):
+    asar = tmp_path / "app.asar"
+    plugin = tmp_path / "plugin.js"
+    plugin.write_bytes(b"function membersOwedMentionTurn(log, members) {}\n")
+    asar.write_bytes(b"xxxx membersOwedMentionTurn yyyy\n")
+    assert hm._asar_missing_infernos_bots(asar, plugin) is False

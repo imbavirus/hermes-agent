@@ -6785,6 +6785,36 @@ def _compute_desktop_content_hash(project_root: Path) -> str:
     return h.hexdigest()
 
 
+_INFERNOS_BOTS_SENTINEL = b"membersOwedMentionTurn"
+
+
+def _asar_missing_infernos_bots(asar: Path, plugin: Path) -> bool:
+    """True when plugin.js has Infernos Bot Mode but app.asar does not.
+
+    mtime-only skip left other machines on an Infernos git SHA with a Nous
+    asar (git reset does not replace the packed plugin).
+    """
+    try:
+        if _INFERNOS_BOTS_SENTINEL not in plugin.read_bytes():
+            return False
+    except OSError:
+        return False
+    needle = _INFERNOS_BOTS_SENTINEL
+    try:
+        with asar.open("rb") as fh:
+            tail = b""
+            while True:
+                data = fh.read(1024 * 1024)
+                if not data:
+                    break
+                if needle in tail + data:
+                    return False
+                tail = data[-(len(needle) - 1) :] if len(data) >= len(needle) else tail + data
+        return True
+    except OSError:
+        return True
+
+
 def _packaged_asar_older_than_source(desktop_dir: Path, project_root: Path) -> bool:
     """True when win-unpacked app.asar is older than bots plugin.js (or missing)."""
     executable = _desktop_packaged_executable(desktop_dir)
@@ -6795,6 +6825,8 @@ def _packaged_asar_older_than_source(desktop_dir: Path, project_root: Path) -> b
     if not plugin.is_file():
         plugin = project_root / "apps" / "desktop" / "package.json"
     if not asar.is_file():
+        return True
+    if plugin.name == "plugin.js" and _asar_missing_infernos_bots(asar, plugin):
         return True
     try:
         return asar.stat().st_mtime + 1 < plugin.stat().st_mtime

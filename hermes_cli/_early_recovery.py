@@ -451,6 +451,14 @@ def recover_if_needed(
         root = _project_root() if project_root is None else project_root
         if _pytest_owns_live_checkout(root):
             return
+        # Cheap: rewrite pyvenv.cfg off a Win11-untrusted uv python junction
+        # so venv\\Scripts\\python.exe can spawn. No-op when home already works.
+        try:
+            from hermes_cli._install_repair import retarget_broken_uv_python_home
+
+            retarget_broken_uv_python_home(root / "venv")
+        except Exception:
+            pass
         core_marker = root / ".update-incomplete"
         lazy_marker = root / ".lazy-refresh-incomplete"
         if not core_marker.exists() and not lazy_marker.exists():

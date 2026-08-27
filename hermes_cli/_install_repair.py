@@ -690,3 +690,102 @@ def bump_marker_attempts(marker_path: Path) -> int:
     except OSError:
         pass
     return attempts
+
+
+# ---------------------------------------------------------------------------
+# Win11 24H2: uv unversioned python junctions as "untrusted mount points"
+# ---------------------------------------------------------------------------
+
+def _pyvenv_home_line(venv_dir: Path) -> tuple[str, Path] | None:
+    """Return (raw cfg text, home Path) from ``venv/pyvenv.cfg``, or None."""
+    cfg_path = Path(venv_dir) / "pyvenv.cfg"
+    try:
+        raw = cfg_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip().lower() == "home" and value.strip():
+            return raw, Path(value.strip())
+    return None
+
+
+def _uv_versioned_python_sibling(home: Path) -> Path | None:
+    """``cpython-3.11-windows-…`` → sibling ``cpython-3.11.15-windows-…/python.exe`` parent."""
+    name = home.name
+    if not (
+        name.startswith("cpython-")
+        and name.endswith("-windows-x86_64-none")
+        and home.parent.name.lower() == "python"
+    ):
+        return None
+    # Unversioned: cpython-3.11-windows-x86_64-none
+    # Versioned:   cpython-3.11.15-windows-x86_64-none
+    core = name[len("cpython-") : -len("-windows-x86_64-none")]
+    if not core:
+        return None
+    # Already versioned (cpython-3.11.15-…) — leave it.
+    if len(core.split(".")) >= 3:
+        return None
+    prefix = f"cpython-{core}."
+    suffix = "-windows-x86_64-none"
+    try:
+        siblings = list(home.parent.iterdir())
+    except OSError:
+        return None
+    matches: list[Path] = []
+    for sibling in siblings:
+        if not sibling.name.startswith(prefix) or not sibling.name.endswith(suffix):
+            continue
+        exe = sibling / "python.exe"
+        try:
+            if exe.is_file():
+                matches.append(sibling)
+        except OSError:
+            continue
+    if not matches:
+        return None
+    matches.sort(key=lambda p: p.name, reverse=True)
+    return matches[0]
+
+
+def retarget_broken_uv_python_home(venv_dir) -> str | None:
+    """Rewrite ``pyvenv.cfg`` home= off a uv junction Windows will not traverse.
+
+    uv stores the real interpreter at
+    ``%APPDATA%/uv/python/cpython-3.11.15-windows-x86_64-none/python.exe`` and
+    a junction ``cpython-3.11-windows-x86_64-none`` beside it. Win11 24H2+
+    treats some of those junctions as untrusted mount points (os error 448),
+    so ``venv\\\\Scripts\\\\python.exe`` (uv trampoline) dies with
+    ``uv trampoline failed to spawn Python child process / entity not found``
+    while the versioned ``python.exe`` still runs.
+
+    Stdlib-only. Never raises. Returns the new home path when rewritten.
+    """
+    venv_dir = Path(venv_dir)
+    parsed = _pyvenv_home_line(venv_dir)
+    if parsed is None:
+        return None
+    raw, home = parsed
+    exe = home / "python.exe"
+    try:
+        if exe.is_file():
+            return None
+    except OSError:
+        pass
+    target = _uv_versioned_python_sibling(home)
+    if target is None:
+        return None
+    new_lines = []
+    for line in raw.splitlines():
+        key, sep, _value = line.partition("=")
+        if key.strip().lower() == "home" and sep:
+            new_lines.append(f"{key}{sep} {target}")
+        else:
+            new_lines.append(line)
+    cfg_path = venv_dir / "pyvenv.cfg"
+    try:
+        cfg_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return str(target)
