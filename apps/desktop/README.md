@@ -40,11 +40,20 @@ Prebuilt installers are built and distributed via [the Hermes Desktop website.](
 
 ## Updating
 
-The app checks for updates in the background and offers a one-click update when one is ready. You can also update any time from the CLI:
+**This fork is [imbavirus/hermes-agent](https://github.com/imbavirus/hermes-agent).** The in-app update button and `hermes update` only pull Infernos Bot Mode if git `origin` (or `fork`) is that repo — not `NousResearch/hermes-agent`.
+
+`git log` matching `main` is **not** enough. Group rooms / `@mentions` / Close / End are packed into `app.asar` (renderer also under `app.asar.unpacked/dist`). Checkout does not replace a running or Start Menu `Hermes.exe`.
+
+Full guide (quit → retarget remotes → `hermes update` / `--force-build` → launch `win-unpacked\Hermes.exe` → proof strings, plus the Win11 uv trampoline repair): **[Upgrade Hermes Desktop](../../README.md#upgrade-hermes-desktop-this-fork)** in the repo README.
 
 ```bash
+# fully quit Desktop first
 hermes update
+# if git is already current:
+hermes desktop --force-build
 ```
+
+Launch `{checkout}/apps/desktop/release/win-unpacked/Hermes.exe` (Windows) or the unpacked binary under `apps/desktop/release/` on macOS/Linux — not an older installer copy.
 
 ---
 

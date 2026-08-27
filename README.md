@@ -102,6 +102,92 @@ For more context, see the upstream Astral reports: [astral-sh/uv#13553](https://
 
 ---
 
+## Upgrade Hermes Desktop (this fork)
+
+This GitHub repo is **[imbavirus/hermes-agent](https://github.com/imbavirus/hermes-agent)**, not Nous. If you installed Desktop with the public Nous one-liner, `hermes update` will keep tracking Nous and you will **not** get Infernos Bot Mode (group rooms, `@mentions`, Close / End).
+
+**`git log` is not the running app.** Bot Mode is packed into `app.asar` / `app.asar.unpacked`. A machine can be on the right SHA and still show stock Desktop until you rebuild and launch **that** `Hermes.exe`.
+
+Checkout (Windows): `%LOCALAPPDATA%\hermes\hermes-agent`  
+Checkout (macOS/Linux): `~/.hermes/hermes-agent`
+
+### 1. Fully quit Desktop
+
+Quit every `Hermes.exe` / `Hermes` window. Packing while the app is open dies `EBUSY` on `v8_context_snapshot.bin` and leaves yesterday’s asar in place.
+
+### 2. Point git at this fork
+
+```powershell
+cd $env:LOCALAPPDATA\hermes\hermes-agent
+git remote -v
+```
+
+| `origin` | What to do |
+|---|---|
+| `imbavirus/hermes-agent` | Skip to step 3 |
+| `NousResearch/hermes-agent` | `git remote add fork https://github.com/imbavirus/hermes-agent.git` (or `git remote set-url origin` to the same URL). Do **not** `hermes update` while origin is still Nous — it will skip or overwrite Infernos commits |
+
+```powershell
+git fetch origin   # or: git fetch fork
+git checkout main
+git reset --hard origin/main   # or: fork/main
+git log -1 --oneline
+# expect imbavirus main (Bot Mode lives in apps/desktop/src/plugins/hermes-bots/plugin.js)
+```
+
+### 3. Update and rebuild the packed app
+
+```powershell
+hermes update
+```
+
+On current `main`, update **always** force-builds Desktop asar (stamp-skip used to leave a Nous pack on an Infernos SHA). If git is already current:
+
+```powershell
+hermes desktop --force-build
+```
+
+Launch **this** tree, not a Start Menu / old NSIS copy:
+
+```text
+%LOCALAPPDATA%\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe
+```
+
+macOS/Linux: `hermes desktop --force-build` then the unpacked binary under `apps/desktop/release/`.
+
+### 4. Proof it actually packed
+
+```powershell
+git -C $env:LOCALAPPDATA\hermes\hermes-agent log -1 --oneline
+git -C $env:LOCALAPPDATA\hermes\hermes-agent grep membersOwedMentionTurn HEAD -- apps/desktop/src/plugins/hermes-bots/plugin.js
+Get-Item $env:LOCALAPPDATA\hermes\hermes-agent\apps\desktop\release\win-unpacked\resources\app.asar
+Select-String -Path "$env:LOCALAPPDATA\hermes\hermes-agent\apps\desktop\release\win-unpacked\resources\app.asar.unpacked\dist\assets\index-*.js" -Pattern "Heard you" -SimpleMatch -Quiet
+```
+
+| Result | Meaning |
+|---|---|
+| `git grep` empty | Wrong tree / still on Nous |
+| `git grep` hits, asar mtime old, no `Heard you` | Source updated, pack did not land — quit Desktop and `--force-build` again |
+| `Heard you` in unpacked `index-*.js` **and** you launched that `win-unpacked\Hermes.exe` | Bot Mode is in the running app |
+
+### Windows: `uv trampoline failed to spawn Python child process`
+
+Win11 24H2 can refuse uv’s **unversioned** junction (`%APPDATA%\uv\python\cpython-3.11-windows-x86_64-none`). `hermes.exe` then dies with `entity not found` even though git is current.
+
+Use the **versioned** interpreter next to it (`cpython-3.11.*-windows-x86_64-none\python.exe`, not the junction), then:
+
+```powershell
+$py = Get-ChildItem "$env:APPDATA\uv\python\cpython-3.11.*-windows-x86_64-none\python.exe" | Sort-Object Name -Descending | Select-Object -First 1
+& $py.FullName -m venv --upgrade "$env:LOCALAPPDATA\hermes\hermes-agent\venv"
+& "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\python.exe" -c "import sys; print(sys.version)"
+Copy-Item "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\hermes.exe" "$env:LOCALAPPDATA\hermes\bin\hermes.exe" -Force
+hermes update
+```
+
+If `venv\Scripts\python.exe` is locked, fully quit Desktop first.
+
+---
+
 ## Getting Started
 
 ```bash
