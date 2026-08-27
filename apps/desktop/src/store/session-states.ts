@@ -1307,7 +1307,8 @@ export function openSessionTile(
   dir: TileDock = 'right',
   anchor?: string,
   before?: null | string,
-  workspaceScope: SessionTileWorkspaceScope = { workspaceMode: 'sessions' }
+  workspaceScope: SessionTileWorkspaceScope = { workspaceMode: 'sessions' },
+  initial?: { ownerRoute?: SessionOwnerRoute; runtimeId?: string }
 ) {
   const tiles = $sessionTiles.get()
 
@@ -1334,7 +1335,8 @@ export function openSessionTile(
         anchor: dock,
         before,
         dir,
-        ownerRoute: workspaceScope.workspaceMode === 'bots' ? workspaceScope.ownerRoute : undefined,
+        ownerRoute: initial?.ownerRoute ?? workspaceScope.ownerRoute,
+        runtimeId: initial?.runtimeId,
         storedSessionId,
         workspaceMode: workspaceScope.workspaceMode,
         workspaceOwnerKey,

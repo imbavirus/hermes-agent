@@ -13,7 +13,7 @@ import {
   readOnlyRuntimeIdFor,
   resumeWithStoredTranscriptFallback
 } from '@/store/read-only-transcript'
-import { knownSessionOwner, ownerLookupSessionRows } from '@/store/session'
+import { knownSessionOwner, ownerLookupSessionRows, getSessionOwnerHint } from '@/store/session'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
 import { publishSessionState, sessionTileOwnerRoute, setSessionTileDelegate } from '@/store/session-states'
@@ -92,6 +92,7 @@ export function useSessionTileDelegate({
     const ownerForStoredSession = async (storedSessionId: string): Promise<SessionOwnerScope> => {
       const owner =
         sessionTileOwnerRoute(storedSessionId) ??
+        getSessionOwnerHint(storedSessionId) ??
         knownSessionOwner(ownerLookupSessionRows(), storedSessionId) ??
         (await resolveSessionOwner(storedSessionId))
 

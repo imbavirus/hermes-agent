@@ -3589,6 +3589,40 @@ describe('openNewSessionTile workspace target', () => {
 
     expect(createParams).not.toHaveProperty('cwd')
   })
+
+  it('stamps owner + runtimeId on the tile in the same write as adoption', async () => {
+    $sessionTiles.set([])
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        return {
+          info: { cwd: '', model: 'test-model', tools: {}, skills: {} },
+          session_id: RUNTIME_SESSION_ID,
+          stored_session_id: 'stored-new-tab'
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await act(async () => {
+      await handle!.openNewSessionTile('center', { listed: false })
+    })
+
+    const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === 'stored-new-tab')
+
+    expect(tile?.runtimeId).toBe(RUNTIME_SESSION_ID)
+    expect(tile?.ownerRoute).toEqual(
+      expect.objectContaining({
+        connectionId: expect.any(String),
+        profile: expect.any(String)
+      })
+    )
+  })
 })
 describe('selectSidebarItem', () => {
   it('fronts the workspace pane when navigating to a sidebar route (issue #72602)', async () => {

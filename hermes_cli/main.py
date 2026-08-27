@@ -6785,6 +6785,23 @@ def _compute_desktop_content_hash(project_root: Path) -> str:
     return h.hexdigest()
 
 
+def _packaged_asar_older_than_source(desktop_dir: Path, project_root: Path) -> bool:
+    """True when win-unpacked app.asar is older than bots plugin.js (or missing)."""
+    executable = _desktop_packaged_executable(desktop_dir)
+    if executable is None:
+        return False
+    asar = executable.parent / "resources" / "app.asar"
+    plugin = project_root / "apps" / "desktop" / "src" / "plugins" / "hermes-bots" / "plugin.js"
+    if not plugin.is_file():
+        plugin = project_root / "apps" / "desktop" / "package.json"
+    if not asar.is_file():
+        return True
+    try:
+        return asar.stat().st_mtime + 1 < plugin.stat().st_mtime
+    except OSError:
+        return True
+
+
 def _desktop_stamp_path() -> Path:
     """Return the path to the desktop build stamp file under $HERMES_HOME."""
     from hermes_constants import get_hermes_home
@@ -6876,6 +6893,13 @@ def _desktop_build_needed(desktop_dir: Path, project_root: Path, *, source_mode:
     dist_dir = _renderer_bundle_dir(desktop_dir, source_mode=source_mode)
     if dist_dir is not None and _renderer_bundle_torn(dist_dir):
         print(f"  ⚠ A previous update left the desktop bundle incomplete ({dist_dir}); rebuilding it")
+        return True
+
+    # Git can advance plugin.js without packing app.asar. Stamp hash is the
+    # source tree; a checkout-only update leaves the packaged bots plugin
+    # yesterday's. If asar is older than the bots plugin, rebuild.
+    if not source_mode and _packaged_asar_older_than_source(desktop_dir, project_root):
+        print("  ⚠ Packaged app.asar is older than desktop source; rebuilding it")
         return True
 
     stamp_file = _desktop_stamp_path()

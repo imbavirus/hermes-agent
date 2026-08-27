@@ -47,7 +47,8 @@ import {
   ensureGatewayAgent,
   ensureGatewayProfile,
   normalizeProfileKey,
-  resolveNewChatOwnerRoute
+  resolveNewChatOwnerRoute,
+  mintingOwnerRouteForNewChat
 } from '@/store/profile'
 import {
   $projectScope,
@@ -529,21 +530,16 @@ export function useSessionActions({
 
           stored = created.stored_session_id ?? null
 
-          // Record the EXACT owner the moment a routed create returns a stored
-          // id — before the drift check, the optimistic row, navigation, or any
-          // session-scoped RPC can resolve this session's owner. The route is
-          // the only authority: in All-profiles / Bot routing the ambient
-          // $activeGatewayProfile stays on `default` while the session lives on
-          // `capturedRoute` (e.g. local::omar). Without this hint the optimistic
-          // row (stamped from ambient) was the only owner record, so the first
-          // turn ran on omar and every later session-scoped RPC resolved the row
-          // as `default` and 4001'd "session not found".
-          if (stored && capturedRoute) {
-            setSessionOwnerHint(stored, capturedRoute)
-            // Pin the owner socket until the foreground publication (route →
-            // $selectedStoredSessionId) covers it, so a prune or lease release
-            // in that gap cannot close the runtime before the first prompt.
-            holdSessionOwnerUntilForeground(stored, capturedRoute)
+          // Record the EXACT owner the moment a create returns a stored id —
+          // before the drift check, the optimistic row, navigation, or any
+          // session-scoped RPC can resolve this session's owner. Ambient
+          // creates (capturedRoute null) still get a minting route so
+          // fail-closed resume / first-turn RPC can name the backend.
+          const mintingRoute = mintingOwnerRouteForNewChat(capturedRoute)
+
+          if (stored) {
+            setSessionOwnerHint(stored, mintingRoute)
+            holdSessionOwnerUntilForeground(stored, mintingRoute)
           }
         } finally {
           releaseCreateLease()
@@ -599,7 +595,7 @@ export function useSessionActions({
           // server later returns its own preview/title and supersedes this.
           // The row carries the create route's exact owner (backend profile +
           // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, capturedRoute)
+          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, mintingOwnerRouteForNewChat(capturedRoute))
           navigate(sessionRoute(stored), { replace: true })
           // Other windows (e.g. the main window when this is the pop-out) can't
           // see this session until they re-pull the shared list.
@@ -722,12 +718,14 @@ export function useSessionActions({
 
           stored = created.stored_session_id
 
-          if (stored && capturedRoute) {
+          const mintingRoute = mintingOwnerRouteForNewChat(capturedRoute)
+
+          if (stored) {
             // Same ownership transition as createBackendSessionForSend: the
             // route that minted the session is its exact owner from this
-            // moment on, and its socket stays pinned until the tile mounts.
-            setSessionOwnerHint(stored, capturedRoute)
-            holdSessionOwnerUntilForeground(stored, capturedRoute)
+            // moment on, including ambient creates (no capturedRoute).
+            setSessionOwnerHint(stored, mintingRoute)
+            holdSessionOwnerUntilForeground(stored, mintingRoute)
           }
         } finally {
           releaseCreateLease()
@@ -753,7 +751,7 @@ export function useSessionActions({
         // unlisted (draft) tab stays out of the session list until its first
         // turn persists and a refresh surfaces it.
         if (listed) {
-          upsertOptimisticSession(created, stored, null, null, null, undefined, capturedRoute)
+          upsertOptimisticSession(created, stored, null, null, null, undefined, mintingOwnerRouteForNewChat(capturedRoute))
         }
 
         // A tile lives in its OWN worktree, so it must not run the full
@@ -765,8 +763,16 @@ export function useSessionActions({
         const runtimeInfo = applyRuntimeInfo(created.info, { foreground: false })
         updateSessionState(created.session_id, state => (runtimeInfo ? { ...state, ...runtimeInfo } : state), stored)
 
-        openSessionTile(stored, dir, undefined, undefined, workspaceScope)
-        patchSessionTile(stored, { runtimeId: created.session_id })
+        const mintingRoute = mintingOwnerRouteForNewChat(capturedRoute)
+
+        // Stamp owner + runtime in the SAME tile write as adoption. A follow-up
+        // patchSessionTile races the resume effect: the tile mounts with no
+        // runtimeId, fail-closed session.resume fires (no owner on an unlisted
+        // draft), and "+" paints "Couldn't open this session".
+        openSessionTile(stored, dir, undefined, undefined, {
+          ...workspaceScope,
+          ownerRoute: workspaceScope.ownerRoute ?? mintingRoute
+        }, { ownerRoute: workspaceScope.ownerRoute ?? mintingRoute, runtimeId: created.session_id })
 
         if (dir === 'center' && runtimeInfo?.cwd) {
           setCurrentCwdTransient(runtimeInfo.cwd)

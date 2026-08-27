@@ -327,6 +327,33 @@ export function resolveNewChatOwnerRoute(): AgentProfileRoute | null {
   }
 }
 
+/**
+ * Owner to stamp on a chat THIS window just minted.
+ *
+ * `resolveNewChatOwnerRoute` is null for the legacy ambient create path
+ * (no registry connection id on the primary). Modern Desktop still publishes
+ * a connections API, so `hasRegistryTopology()` is true and fail-closed
+ * resume treats an unstamped new tab as an orphan — "+" / ⌘T then shows
+ * "Couldn't open this session". The backend that just ran `session.create`
+ * IS the owner; fall back to the active source, or `local` + the active
+ * profile when the primary has no connection id yet.
+ */
+export function mintingOwnerRouteForNewChat(
+  captured: AgentProfileRoute | null = resolveNewChatOwnerRoute()
+): AgentProfileRoute {
+  if (captured) {
+    return captured
+  }
+
+  const connectionId = (activeGatewayConnectionId() ?? '').trim() || LOCAL_CONNECTION_ID
+
+  return {
+    connectionId,
+    mode: connectionId === LOCAL_CONNECTION_ID ? 'local' : undefined,
+    profile: normalizeProfileKey($newChatProfile.get() || $activeGatewayProfile.get())
+  }
+}
+
 // Bumped whenever the open session should be dropped for a fresh new-session
 // draft: a profile switch/create (below), or deleting the project that owns the
 // currently-open session (store/projects). The chat controller subscribes and

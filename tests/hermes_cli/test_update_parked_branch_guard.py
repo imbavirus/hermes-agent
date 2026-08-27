@@ -253,7 +253,7 @@ def _patch_update_flow(monkeypatch, repo, run_real_git=True):
     monkeypatch.setattr(hermes_main, "_is_windows", lambda: False)
     monkeypatch.setattr(
         hermes_main, "_get_origin_url",
-        lambda *a, **k: "https://github.com/NousResearch/hermes-agent.git",
+        lambda *a, **k: "https://github.com/imbavirus/hermes-agent.git",
     )
     monkeypatch.setattr(hermes_main, "_is_fork", lambda *a, **k: False)
     monkeypatch.setattr(hermes_main, "_discard_lockfile_churn", lambda *a, **k: None)

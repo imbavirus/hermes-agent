@@ -1821,7 +1821,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
         _m().sys.exit(1)
     _abort_zip_update_if_dirty_tree()
     zip_url = (
-        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
+        f"https://github.com/imbavirus/hermes-agent/archive/refs/heads/{branch}.zip"
     )
 
     print("→ Downloading latest version...")
@@ -2559,13 +2559,13 @@ def _discard_stashed_changes(
     return True
 
 OFFICIAL_REPO_URLS = {
-    "https://github.com/NousResearch/hermes-agent.git",
-    "git@github.com:NousResearch/hermes-agent.git",
-    "https://github.com/NousResearch/hermes-agent",
-    "git@github.com:NousResearch/hermes-agent",
+    "https://github.com/imbavirus/hermes-agent.git",
+    "git@github.com:imbavirus/hermes-agent.git",
+    "https://github.com/imbavirus/hermes-agent",
+    "git@github.com:imbavirus/hermes-agent",
 }
 
-OFFICIAL_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
+OFFICIAL_REPO_URL = "https://github.com/imbavirus/hermes-agent.git"
 
 SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 
@@ -2599,6 +2599,54 @@ def _is_fork(origin_url: Optional[str]) -> bool:
         if normalized == official_normalized:
             return False
     return True
+
+def _list_remote_urls(git_cmd: list[str], cwd: Path) -> dict[str, str]:
+    """Return ``{remote_name: fetch_url}`` for this checkout."""
+    remotes: dict[str, str] = {}
+    try:
+        result = subprocess.run(
+            git_cmd + ["remote", "-v"],
+            cwd=cwd,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except Exception:
+        return remotes
+    if result.returncode != 0:
+        return remotes
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and (len(parts) < 3 or parts[2] == "(fetch)"):
+            remotes[parts[0]] = parts[1]
+    return remotes
+
+def _resolve_update_remote(git_cmd: list[str], cwd: Path) -> str:
+    """Remote that carries Infernos ``main`` (imbavirus/hermes-agent).
+
+    Prefer ``origin`` when it already is official, then ``fork`` (the
+    Infernos workstation layout: origin=Nous, fork=imbavirus). If the
+    checkout only has Nous as origin, add ``fork`` pointing at official
+    and update from that — never pull Nous over Infernos patches.
+    """
+    remotes = _list_remote_urls(git_cmd, cwd)
+    for name in ("origin", "fork"):
+        if name in remotes and not _is_fork(remotes[name]):
+            return name
+    for name, url in remotes.items():
+        if not _is_fork(url):
+            return name
+    origin_url = remotes.get("origin")
+    if origin_url and _is_fork(origin_url) and "fork" not in remotes:
+        added = subprocess.run(
+            git_cmd + ["remote", "add", "fork", OFFICIAL_REPO_URL],
+            cwd=cwd,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if added.returncode == 0:
+            print(f"→ Added fork remote {OFFICIAL_REPO_URL} (official Infernos tree)")
+            return "fork"
+    return "origin"
 
 def _has_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
     """Check if an 'upstream' remote already exists."""
@@ -2691,7 +2739,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         # Ask user if they want to add upstream
         print()
         print("ℹ Your fork is not tracking the official Hermes repository.")
-        print("  This means you may miss updates from NousResearch/hermes-agent.")
+        print("  This means you may miss updates from imbavirus/hermes-agent.")
         print()
         try:
             response = (
@@ -3976,42 +4024,18 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     depth_args = ["--depth", "1"] if is_shallow else []
 
     if branch == "main":
-        # Probe locally (~6 ms) whether an 'upstream' remote exists at all
-        # before spending a network fetch on it. Non-fork installs have no
-        # 'upstream' remote, and the old flow burned a failed network attempt
-        # (~0.3-1 s) on every --check before falling back to origin.
-        has_upstream_remote = (
-            subprocess.run(
-                git_cmd + ["remote", "get-url", "upstream"],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-            ).returncode
-            == 0
+        # Infernos official remote (imbavirus, often named fork) beats a
+        # Nous `upstream` remote that would hide our patches.
+        update_remote = _resolve_update_remote(git_cmd, _m().PROJECT_ROOT)
+        print(f"→ Fetching from {update_remote}...")
+        fetch_result = subprocess.run(
+            git_cmd + ["fetch"] + depth_args + [update_remote, branch],
+            cwd=_m().PROJECT_ROOT,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
         )
-        fetch_result = None
-        if has_upstream_remote:
-            print("→ Fetching from upstream...")
-            fetch_result = subprocess.run(
-                git_cmd + ["fetch"] + depth_args + ["upstream", branch],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-            )
-        if fetch_result is not None and fetch_result.returncode == 0:
-            upstream_exists = True
-            compare_branch = f"upstream/{branch}"
-        else:
-            # No upstream remote, or the upstream fetch failed — use origin.
-            print("→ Fetching from origin...")
-            fetch_result = subprocess.run(
-                git_cmd + ["fetch"] + depth_args + ["origin", branch],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-            )
-            upstream_exists = False
-            compare_branch = f"origin/{branch}"
+        upstream_exists = False
+        compare_branch = f"{update_remote}/{branch}"
     else:
         # Non-default branch: compare against origin/<branch> directly.
         print("→ Fetching from origin...")
@@ -7092,6 +7116,31 @@ def _desktop_app_present(desktop_dir: Path) -> bool:
     )
 
 
+def _unlock_packaged_desktop_for_rebuild(desktop_dir: Path) -> None:
+    """Drop file locks on win-unpacked so electron-builder can replace app.asar.
+
+    Pack while Hermes.exe is still running dies EBUSY on
+    ``v8_context_snapshot.bin``. Only the packaged Desktop image is killed —
+    not the CLI python running ``hermes update``.
+    """
+    if sys.platform != "win32":
+        return
+    packaged = getattr(_m(), "_desktop_packaged_executable", None)
+    if packaged is None:
+        return
+    exe = packaged(desktop_dir)
+    if exe is None:
+        return
+    subprocess.run(
+        ["taskkill", "/IM", "Hermes.exe", "/F"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
 def _rebuild_desktop_after_update(
     desktop_dir: Path, *, had_desktop_app_before_update: bool
 ) -> bool:
@@ -7132,6 +7181,8 @@ def _rebuild_desktop_after_update(
     if skip_desktop_build:
         print("  ✓ Desktop app up to date")
         return True
+
+    _unlock_packaged_desktop_for_rebuild(desktop_dir)
 
     desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
     # Capture the (very loud) Electron/vite build output into update.log
@@ -7539,11 +7590,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     # Detect if we're updating from a fork (before any branch logic)
     origin_url = _m()._get_origin_url(git_cmd, _m().PROJECT_ROOT)
-    is_fork = _is_fork(origin_url)
+    update_remote = _resolve_update_remote(git_cmd, _m().PROJECT_ROOT)
+    remotes_now = _list_remote_urls(git_cmd, _m().PROJECT_ROOT)
+    update_url = remotes_now.get(update_remote) or origin_url
+    is_fork = _is_fork(update_url)
 
     if is_fork:
         print("⚠ Updating from fork:")
-        print(f"  {origin_url}")
+        print(f"  {update_url}")
+        print()
+    elif update_remote != "origin":
+        print(f"→ Official Infernos tree: {update_remote} ({update_url})")
         print()
 
     if use_zip_update:
@@ -7582,9 +7639,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
         if swept:
             print("  (removed %d aborted-fetch pack temp file(s))" % len(swept))
 
-        print("→ Fetching updates...")
+        print(f"→ Fetching updates from {update_remote}...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
+            git_cmd + ["fetch", update_remote, branch],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -7673,7 +7730,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     # previously surfaced through the checkout failing, which
                     # does not run on this path.
                     verify_ref = subprocess.run(
-                        git_cmd + ["rev-parse", "--verify", "--quiet", f"origin/{branch}"],
+                        git_cmd + ["rev-parse", "--verify", "--quiet", f"{update_remote}/{branch}"],
                         cwd=_m().PROJECT_ROOT,
                         capture_output=True,
                         text=True, encoding="utf-8", errors="replace",
@@ -7720,7 +7777,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 # the common case when the requested branch exists upstream
                 # but was never checked out locally.
                 track_result = subprocess.run(
-                    git_cmd + ["checkout", "-B", branch, f"origin/{branch}"],
+                    git_cmd + ["checkout", "-B", branch, f"{update_remote}/{branch}"],
                     cwd=_m().PROJECT_ROOT,
                     capture_output=True,
                     text=True, encoding="utf-8", errors="replace",
@@ -7756,7 +7813,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # 0), so keep it, but treat the shallow NUMBER as unknown and recover
         # the real one via the GitHub compare API when possible.
         result = subprocess.run(
-            git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
+            git_cmd + ["rev-list", f"HEAD..{update_remote}/{branch}", "--count"],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -7782,7 +7839,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 text=True, encoding="utf-8", errors="replace",
             ).stdout.strip()
             target_sha = subprocess.run(
-                git_cmd + ["rev-parse", f"origin/{branch}"],
+                git_cmd + ["rev-parse", f"{update_remote}/{branch}"],
                 cwd=_m().PROJECT_ROOT, capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
             ).stdout.strip()
@@ -7977,6 +8034,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # path — that early return is what left the gateway on stale
             # code for two days.
             _apply_pending_fleet_restart_catchup()
+            # Same class of miss: git reset/checkout to Infernos main without
+            # packing leaves yesterday's app.asar (bots plugin baked in).
+            _rebuild_desktop_after_update(
+                desktop_dir,
+                had_desktop_app_before_update=had_desktop_app_before_update,
+            )
             return
 
         if commit_count > 0:
@@ -8002,7 +8065,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # `pull --ff-only origin <branch>` given the fresh tracking ref;
             # the divergence fallback below is unchanged.
             pull_result = subprocess.run(
-                git_cmd + ["merge", "--ff-only", f"origin/{branch}"],
+                git_cmd + ["merge", "--ff-only", f"{update_remote}/{branch}"],
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
@@ -8037,7 +8100,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         check=False,
                     )
                     merge_result = subprocess.run(
-                        git_cmd + ["merge", "--no-edit", f"origin/{branch}"],
+                        git_cmd + ["merge", "--no-edit", f"{update_remote}/{branch}"],
                         cwd=_m().PROJECT_ROOT,
                         capture_output=True,
                         text=True, encoding="utf-8", errors="replace",
@@ -8069,7 +8132,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
                     )
                     reset_result = subprocess.run(
-                        git_cmd + ["reset", "--hard", f"origin/{branch}"],
+                        git_cmd + ["reset", "--hard", f"{update_remote}/{branch}"],
                         cwd=_m().PROJECT_ROOT,
                         capture_output=True,
                         text=True, encoding="utf-8", errors="replace",
@@ -8079,7 +8142,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         if reset_result.stderr.strip():
                             print(f"  {reset_result.stderr.strip()}")
                         print(
-                            f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
+                            f"  Try manually: git fetch {update_remote} && git reset --hard {update_remote}/{branch}"
                         )
                         sys.exit(1)
 

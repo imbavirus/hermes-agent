@@ -683,6 +683,31 @@ describe('sessionTileOwnerRoute', () => {
 
     expect(sessionTileOwnerRoute('missing')).toBeUndefined()
   })
+
+  it('adopts a new session tile with owner and runtime in one write', () => {
+    $sessionTiles.set([])
+    openSessionTile(
+      'fresh-tab',
+      'center',
+      undefined,
+      undefined,
+      { workspaceMode: 'sessions' },
+      {
+        ownerRoute: { connectionId: 'local', profile: 'dev' },
+        runtimeId: 'rt-fresh'
+      }
+    )
+
+    expect($sessionTiles.get()).toEqual([
+      expect.objectContaining({
+        ownerRoute: { connectionId: 'local', profile: 'dev' },
+        runtimeId: 'rt-fresh',
+        storedSessionId: 'fresh-tab',
+        workspaceMode: 'sessions'
+      })
+    ])
+    expect(sessionTileOwnerRoute('fresh-tab')).toEqual({ connectionId: 'local', profile: 'dev' })
+  })
 })
 
 describe('knownOwnerForSession / requestForOwnedSession (#91684 client half)', () => {
