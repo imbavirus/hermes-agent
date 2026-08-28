@@ -81,8 +81,9 @@ function classifyVenvBlocker(
   hints?: Record<string, unknown>
 ): VenvBlockerProcess {
   const trustedRuntimeIdentity = hints?.kind === 'hermes-runtime' && hints.safeToStop === true
+  const isVenvHermesShim = /^hermes(?:\.exe)?$/i.test(process.name)
 
-  if (trustedRuntimeIdentity || isHermesRuntimeCmdline(process.cmdline)) {
+  if (trustedRuntimeIdentity || isVenvHermesShim || isHermesRuntimeCmdline(process.cmdline)) {
     return { ...process, kind: 'hermes-runtime', safeToStop: true }
   }
 
@@ -186,6 +187,13 @@ async function defaultKillHermesRuntimePid(pid: number): Promise<void> {
   })
 }
 
+export function isAlreadyDeadKillError(err: unknown): boolean {
+  const anyErr = err as { stderr?: string; message?: string; code?: number | string }
+  const text = `${anyErr?.stderr || ''} ${anyErr?.message || ''} ${anyErr?.code || ''}`.toLowerCase()
+
+  return text.includes('not found') || text.includes('no tasks running') || String(anyErr?.code) === '128'
+}
+
 /**
  * Stop this-install Hermes CLI holders (serve / gateway / proxy / leftover
  * `--force-build`). Clicking in-app Update is the consent — do not wait for
@@ -206,8 +214,12 @@ export async function stopHermesRuntimeBlockers(
     try {
       await killPid(process.pid)
       stopped.push(process.pid)
-    } catch {
-      failed.push(process.pid)
+    } catch (err) {
+      if (isAlreadyDeadKillError(err)) {
+        stopped.push(process.pid)
+      } else {
+        failed.push(process.pid)
+      }
     }
   }
 

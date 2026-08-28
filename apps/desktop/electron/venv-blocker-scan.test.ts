@@ -221,6 +221,24 @@ describe('parseVenvBlockerScanOutput', () => {
     }
   })
 
+  it('classifies venv hermes.exe shim as runtime even with empty cmdline', () => {
+    const o = parseVenvBlockerScanOutput(
+      ok({
+        blocked: true,
+        processes: [{ pid: 21104, name: 'hermes.exe', cmdline: '' }]
+      })
+    )
+
+    assert.equal(o.kind, 'blocked')
+
+    if (o.kind !== 'blocked') {
+      return
+    }
+
+    assert.equal(o.result.processes[0]?.kind, 'hermes-runtime')
+    assert.equal(o.result.processes[0]?.safeToStop, true)
+  })
+
   it('malformed JSON', () => {
     assert.equal(parseVenvBlockerScanOutput('not json').kind, 'probe-failure')
   })
@@ -432,5 +450,30 @@ describe('stopHermesRuntimeBlockers', () => {
 
     assert.deepEqual(killed, [32428, 37996])
     assert.deepEqual(outcome, { stopped: [32428, 37996], failed: [] })
+  })
+
+  it('treats taskkill not-found as already stopped', async () => {
+    const outcome = await stopHermesRuntimeBlockers(
+      {
+        blocked: true,
+        processes: [
+          {
+            pid: 21104,
+            name: 'hermes.exe',
+            cmdline: '',
+            kind: 'hermes-runtime',
+            safeToStop: true
+          }
+        ]
+      },
+      async () => {
+        const err: any = new Error('Command failed')
+        err.stderr = 'ERROR: The process "21104" not found.'
+        err.code = 128
+        throw err
+      }
+    )
+
+    assert.deepEqual(outcome, { stopped: [21104], failed: [] })
   })
 })

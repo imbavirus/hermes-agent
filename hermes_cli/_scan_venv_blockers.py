@@ -235,13 +235,17 @@ def _is_pausable_gateway(cmdline: str) -> bool:
     return looks_like_gateway_command_line(cmdline)
 
 
-def _classify_hermes_runtime_cmdline(cmdline: str) -> dict[str, object]:
+def _classify_hermes_runtime_cmdline(cmdline: str, name: str = "") -> dict[str, object]:
     """Return safe-to-stop metadata for this-install Hermes CLI runtime holders.
 
     ``serve`` / leftover ``desktop --force-build`` / ``proxy`` hold
     ``venv\\Scripts\\hermes.exe`` on Windows and abort in-app Update after 15s.
-    Pausable gateways stay empty so the existing exemption still applies.
+    The venv shim process itself (name ``hermes.exe``) is always a holder,
+    even when psutil cannot read its command line. Pausable python gateways
+    stay empty so the existing exemption still applies.
     """
+    if str(name).lower() in {"hermes.exe", "hermes"}:
+        return {"kind": "hermes-runtime", "safeToStop": True}
     if not isinstance(cmdline, str) or not cmdline:
         return {}
     if _is_pausable_gateway(cmdline):
@@ -290,7 +294,7 @@ def main() -> None:
             # otherwise swallow the `gateway run` argv).
             "cmdline": _redact_sensitive_cmdline(cmdline)[:120],
         }
-        runtime_meta = _classify_hermes_runtime_cmdline(cmdline)
+        runtime_meta = _classify_hermes_runtime_cmdline(cmdline, name)
         if runtime_meta:
             process.update(runtime_meta)
         else:

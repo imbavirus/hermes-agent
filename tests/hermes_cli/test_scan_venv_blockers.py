@@ -165,6 +165,15 @@ def test_classify_hermes_runtime_cmdline_rejects_unrelated_and_gateway() -> None
     )
 
 
+def test_classify_venv_hermes_exe_name_is_runtime_even_with_empty_cmdline() -> None:
+    from hermes_cli._scan_venv_blockers import _classify_hermes_runtime_cmdline
+
+    assert _classify_hermes_runtime_cmdline("", name="hermes.exe") == {
+        "kind": "hermes-runtime",
+        "safeToStop": True,
+    }
+
+
 def test_terminate_safe_preview_revalidates_identity_and_exact_argv() -> None:
     class FakeProcess:
         def __init__(self, pid: int, *, created: float, args: list[str]) -> None:
