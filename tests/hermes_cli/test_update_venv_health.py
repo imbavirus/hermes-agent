@@ -48,7 +48,14 @@ def _fake_venv_python(tmp_path, *, windows: bool = False):
 # ---------------------------------------------------------------------------
 
 
-def _proc(pid: int, exe: str, name: str, cmdline: list[str] | None = None, cwd: str = ""):
+def _proc(
+    pid: int,
+    exe: str,
+    name: str,
+    cmdline: list[str] | None = None,
+    cwd: str = "",
+    parent_name: str = "",
+):
     proc = MagicMock()
     proc.info = {
         "pid": pid,
@@ -57,6 +64,12 @@ def _proc(pid: int, exe: str, name: str, cmdline: list[str] | None = None, cwd: 
         "cmdline": cmdline or [],
         "cwd": cwd,
     }
+    if parent_name:
+        parent = MagicMock()
+        parent.name.return_value = parent_name
+        proc.parent.return_value = parent
+    else:
+        proc.parent.return_value = None
     return proc
 
 
@@ -84,6 +97,83 @@ def test_detect_venv_python_excludes_self_and_ancestors(_winp, tmp_path):
         sys.modules, {"psutil": fake_psutil}
     ):
         assert cli_main._detect_venv_python_processes() == []
+
+
+@patch.object(cli_main, "_is_windows", return_value=True)
+def test_detect_venv_python_skips_nssm_webui_profile_keeps_serve(_winp, tmp_path):
+    """Unelevated Apply exit 2 listed NSSM/WebUI/profile pythons as venv holders.
+
+    2026-08-28 20:11: ACCESS_DENIED skip worked, then ``hermes update`` died
+    on PIDs 4856/19568/29392/30452/32032/35728 — the same services the
+    overlay scanner already exempts. Overlay exemption is not the CLI guard.
+    A live ``serve`` still blocks. A user REPL still blocks.
+    """
+    import os as _os
+
+    venv_py = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    me = MagicMock()
+    me.parents.return_value = []
+    fake_psutil = types.SimpleNamespace(
+        process_iter=lambda attrs: iter(
+            [
+                _proc(4856, venv_py, "python.exe", parent_name="services.exe"),
+                _proc(19568, venv_py, "python.exe", parent_name="nssm.exe"),
+                _proc(
+                    29392,
+                    venv_py,
+                    "python.exe",
+                    cmdline=[
+                        venv_py,
+                        "-u",
+                        r"C:\Users\imba\hermes-webui\server.py",
+                    ],
+                    parent_name="nssm.exe",
+                ),
+                _proc(
+                    30452,
+                    venv_py,
+                    "python.exe",
+                    cmdline=[
+                        venv_py,
+                        r"C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\infernos-probe-mcp.py",
+                    ],
+                ),
+                _proc(
+                    32032,
+                    venv_py,
+                    "python.exe",
+                    cmdline=[
+                        venv_py,
+                        r"C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\coolify-fail-chat.py",
+                    ],
+                ),
+                _proc(35728, venv_py, "python.exe", parent_name="services.exe"),
+                _proc(
+                    999,
+                    venv_py,
+                    "python.exe",
+                    cmdline=[venv_py, "-m", "hermes_cli.main", "serve"],
+                ),
+                _proc(
+                    1001,
+                    venv_py,
+                    "python.exe",
+                    cmdline=[venv_py],
+                    parent_name="WindowsTerminal.exe",
+                ),
+            ]
+        ),
+        Process=lambda *a, **k: me,
+    )
+    with patch.object(cli_main, "PROJECT_ROOT", tmp_path), patch.dict(
+        sys.modules, {"psutil": fake_psutil}
+    ):
+        matches = cli_main._detect_venv_python_processes()
+    pids = [pid for pid, _name, _cmd in matches]
+    assert 999 in pids
+    assert 1001 in pids
+    assert pids == [999, 1001]
+    assert _os.getpid() not in pids
 
 
 

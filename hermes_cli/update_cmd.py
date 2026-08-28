@@ -4744,6 +4744,26 @@ def _detect_venv_python_processes(
         if not is_holder:
             continue
         name = info.get("name") or Path(exe).name
+        # NSSM / WebUI / profile scripts are Windows services, not user
+        # apps. Overlay scanner already skips them; the CLI venv-holder
+        # guard must too — otherwise unelevated Apply skips sc.exe ACCESS_DENIED
+        # then dies exit 2 on the same PIDs (2026-08-28 20:11).
+        parent_name = ""
+        try:
+            parent = proc.parent()
+            raw = parent.name() if parent is not None else ""
+            parent_name = raw if isinstance(raw, str) else ""
+        except Exception:
+            parent_name = ""
+        try:
+            from hermes_cli._scan_venv_blockers import _is_managed_service_process
+
+            if _is_managed_service_process(
+                cmdline_raw, name=str(name), parent_name=parent_name
+            ):
+                continue
+        except Exception:
+            pass
         # Return the FULL cmdline: callers match against it (the Desktop
         # preflight's pausable-gateway exemption parses for `gateway run`).
         # Truncating here cut long managed-runtime interpreter paths before
