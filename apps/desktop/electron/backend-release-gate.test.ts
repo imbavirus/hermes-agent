@@ -161,4 +161,32 @@ describe('waitForBackendRelease (#74805 first-attempt race)', () => {
     expect(result.unlocked).toBe(true)
     expect(deps.kills).toEqual([])
   })
+
+  it('reaps foreign shim holders that respawn during the wait (proxy/nssm)', async () => {
+    // 2026-08-28 in-app Update: stopHermesRuntimeBlockers killed 33 PIDs
+    // (failed=none) then the 15s gate still saw venv\\Scripts\\hermes.exe locked
+    // — xAI proxy / NSSM restarted the shim holder while we only reaped THIS
+    // window's backends. The gate must kill foreign shim holders every poll.
+    const clock = fakeClock()
+    let reapCount = 0
+    let shimLocked = true
+
+    const deps = makeDeps({
+      now: clock.now,
+      sleep: clock.sleep,
+      isShimLocked: () => shimLocked,
+      reapShimHolders: () => {
+        reapCount += 1
+        if (reapCount >= 2) {
+          shimLocked = false
+        }
+      }
+    })
+
+    const result = await waitForBackendRelease([], deps, 'test')
+
+    expect(reapCount).toBeGreaterThanOrEqual(2)
+    expect(result.unlocked).toBe(true)
+    expect(result.lingeringPids).toEqual([])
+  })
 })

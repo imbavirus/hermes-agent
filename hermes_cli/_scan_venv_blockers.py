@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sys
 from pathlib import PureWindowsPath
@@ -329,6 +330,23 @@ def _iter_pack_debris_processes(existing_pids: set[int]):
             yield pid, name, cmd, meta
 
 
+def _is_shim_holder(cmdline: str, exe: str = "", shim_path: str = "") -> bool:
+    """True when *exe* or *cmdline* is this install's ``venv\\Scripts\\hermes.exe``.
+
+    uv trampolines run a python *outside* the venv whose argv is still the
+    shim (xAI proxy). The Desktop ``win-unpacked\\Hermes.exe`` is a different
+    path and must stay false. The ``--shim-holders`` scanner argv contains the
+    shim path — do not match it or the scan kills itself.
+    """
+    if "--shim-holders" in str(cmdline or "").lower():
+        return False
+    needle = str(shim_path).replace("/", "\\").lower()
+    if not needle:
+        return False
+    blob = f"{exe or ''} {cmdline or ''}".replace("/", "\\").lower()
+    return needle in blob
+
+
 def main() -> None:
     """Entry point.  Prints one JSON doc to stdout.  Exits 0 for valid scan."""
     try:
@@ -407,7 +425,47 @@ def _terminate_safe_main(argv: list[str]) -> NoReturn:
     raise SystemExit(0 if stopped else 1)
 
 
+def _list_shim_holder_pids(shim_path: str) -> list[int]:
+    """PIDs whose exe or cmdline is this install's venv hermes.exe shim."""
+    import psutil  # noqa: PLC0415
+
+    skip = {os.getpid()}
+    try:
+        skip.add(os.getppid())
+    except OSError:
+        pass
+    pids: list[int] = []
+    for proc in psutil.process_iter(["pid", "exe", "cmdline"]):
+        try:
+            pid = int(proc.info["pid"])
+            if pid in skip:
+                continue
+            exe = proc.info.get("exe") or ""
+            cmd = " ".join(proc.info.get("cmdline") or [])
+        except (psutil.Error, TypeError, OSError, ValueError):
+            continue
+        if _is_shim_holder(cmd, exe=exe, shim_path=shim_path):
+            pids.append(pid)
+    return pids
+
+
+def _shim_holders_main(argv: list[str]) -> NoReturn:
+    if len(argv) != 1 or not argv[0]:
+        print(json.dumps({"ok": False, "error": "expected shim path"}))
+        raise SystemExit(2)
+    try:
+        import psutil  # noqa: PLC0415, F401
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": f"psutil is not available: {exc}"}))
+        raise SystemExit(1)
+    pids = _list_shim_holder_pids(argv[0])
+    print(json.dumps({"ok": True, "pids": pids}))
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--terminate-safe":
         _terminate_safe_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "--shim-holders":
+        _shim_holders_main(sys.argv[2:])
     main()

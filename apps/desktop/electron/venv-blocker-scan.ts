@@ -379,6 +379,43 @@ export async function scanVenvBlockers(
   return parseVenvBlockerScanOutput(stdout)
 }
 
+/**
+ * Fast PID list of processes whose exe/cmdline is ``venv\\Scripts\\hermes.exe``.
+ * Used every release-gate poll so a respawned xAI proxy cannot re-lock the shim.
+ */
+export async function listShimHolderPids(
+  updateRoot: string,
+  shimPath: string,
+  execOverride?: typeof execFileAsync,
+  resolveOverride?: typeof resolveVenvPython
+): Promise<number[]> {
+  const execFn = execOverride || execFileAsync
+  const resolveFn = resolveOverride || resolveVenvPython
+  const venvPython = resolveFn(updateRoot)
+
+  if (!venvPython) {
+    return []
+  }
+
+  try {
+    const proc = await execFn(venvPython, ['-m', SCAN_MODULE, '--shim-holders', shimPath], {
+      cwd: updateRoot,
+      encoding: 'utf-8',
+      timeout: 8_000,
+      windowsHide: true
+    } as any)
+    const parsed = JSON.parse(String((proc as any).stdout ?? ''))
+
+    if (!parsed || parsed.ok !== true || !Array.isArray(parsed.pids)) {
+      return []
+    }
+
+    return parsed.pids.filter((pid: unknown) => Number.isInteger(pid) && (pid as number) > 0)
+  } catch {
+    return []
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers (exported for testing)
 // ---------------------------------------------------------------------------

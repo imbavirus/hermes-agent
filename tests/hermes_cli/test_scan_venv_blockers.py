@@ -211,6 +211,40 @@ def test_classify_pack_debris_rejects_user_npm_and_windows_terminal() -> None:
     assert _classify_pack_debris_cmdline(r"C:\Windows\System32\nssm.exe", name="nssm.exe") == {}
 
 
+def test_is_shim_holder_matches_venv_hermes_exe_and_uv_proxy() -> None:
+    from hermes_cli._scan_venv_blockers import _is_shim_holder
+
+    shim = r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe"
+    assert _is_shim_holder(
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe proxy start",
+        exe=shim,
+        shim_path=shim,
+    )
+    assert _is_shim_holder(
+        r"C:\Users\imba\AppData\Roaming\uv\python\cpython-3.11-windows-x86_64-none\python.exe "
+        + shim
+        + " proxy start --provider xai",
+        exe=r"C:\Users\imba\AppData\Roaming\uv\python\cpython-3.11.15-windows-x86_64-none\python.exe",
+        shim_path=shim,
+    )
+
+
+def test_is_shim_holder_rejects_desktop_exe_and_scanner_argv() -> None:
+    from hermes_cli._scan_venv_blockers import _is_shim_holder
+
+    shim = r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe"
+    assert not _is_shim_holder(
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe",
+        exe=r"C:\Users\imba\AppData\Local\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe",
+        shim_path=shim,
+    )
+    assert not _is_shim_holder(
+        r"python.exe -m hermes_cli._scan_venv_blockers --shim-holders " + shim,
+        exe=r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe",
+        shim_path=shim,
+    )
+
+
 def test_terminate_safe_preview_revalidates_identity_and_exact_argv() -> None:
     class FakeProcess:
         def __init__(self, pid: int, *, created: float, args: list[str]) -> None:

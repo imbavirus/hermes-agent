@@ -378,6 +378,7 @@ import {
 import {
   formatBlockerMessage,
   formatProbeFailedMessage,
+  listShimHolderPids,
   scanVenvBlockers,
   stopHermesRuntimeBlockers,
   stopSafeVenvBlockers
@@ -3500,6 +3501,17 @@ async function releaseBackendLock(updateRoot, tag) {
         return stragglers
       },
       killProcessTree: forceKillProcessTree,
+      reapShimHolders: async () => {
+        const pids = await listShimHolderPids(updateRoot, shim)
+
+        for (const pid of pids) {
+          forceKillProcessTree(pid)
+        }
+
+        if (pids.length) {
+          rememberLog(`[${tag}] reaped shim holders during wait: ${pids.join(',')}`)
+        }
+      },
       sleep: (ms: number) => new Promise(r => setTimeout(r, ms)),
       now: () => Date.now(),
       log: rememberLog

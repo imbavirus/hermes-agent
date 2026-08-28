@@ -37,6 +37,13 @@ export interface ReleaseGateDeps {
   collectStragglerPids: () => number[]
   /** Tree-kill (real: taskkill /PID n /T /F). */
   killProcessTree: (pid: number) => void
+  /**
+   * Kill foreign holders of venv\\Scripts\\hermes.exe (xAI proxy, leftover
+   * --force-build, NSSM-respawned shim). Called every poll while the shim
+   * stays locked — a one-shot kill before the gate is not enough; those
+   * processes restart during the 15s wait (2026-08-28 in-app Update).
+   */
+  reapShimHolders?: () => void | Promise<void>
   /** Async sleep; injectable so tests run on a fake clock. */
   sleep: (ms: number) => Promise<void>
   /** Monotonic-enough clock; injectable for tests. */
@@ -89,6 +96,10 @@ export async function waitForBackendRelease(
         killedPids.add(pid)
         deps.killProcessTree(pid)
       }
+    }
+
+    if (deps.isShimLocked() && deps.reapShimHolders) {
+      await deps.reapShimHolders()
     }
 
     await deps.sleep(RELEASE_GATE_POLL_MS)
