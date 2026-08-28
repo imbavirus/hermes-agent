@@ -174,6 +174,106 @@ def test_detect_venv_python_skips_nssm_webui_profile_keeps_serve(_winp, tmp_path
     assert 1001 in pids
     assert pids == [999, 1001]
     assert _os.getpid() not in pids
+    with patch.object(cli_main, "PROJECT_ROOT", tmp_path), patch.dict(
+        sys.modules, {"psutil": fake_psutil}
+    ):
+        managed = cli_main._detect_venv_python_processes(include_managed=True)
+    managed_pids = [pid for pid, _name, _cmd in managed]
+    assert 4856 in managed_pids
+    assert 29392 in managed_pids
+    assert 999 in managed_pids
+
+
+@patch.object(cli_main, "_is_windows", return_value=True)
+def test_venv_mutation_lockers_treat_skipped_scm_as_locked(_winp):
+    """Unelevated Apply must not uv --reinstall after sc.exe ACCESS_DENIED.
+
+    2026-08-28 21:07: skipped Hermes_Gateway_dev, then verification
+    --reinstall tore rich/hermes_cli while NSSM respawned the gateway.
+    """
+    cli_main._update_force_venv = False
+    cli_main._update_gateway_resume = {"skipped_services": ["Hermes_Gateway_dev"]}
+    with patch.object(cli_main, "_detect_venv_python_processes", return_value=[]):
+        holders, skipped = cli_main._venv_mutation_lockers()
+    assert skipped == ["Hermes_Gateway_dev"]
+    assert holders
+    assert holders[0][1] == "nssm"
+    msg = cli_main._format_venv_mutation_lock_message(holders, skipped)
+    assert "Access is denied" in msg
+    assert "Hermes_Gateway_dev" in msg
+    cli_main._update_gateway_resume = None
+
+
+@patch.object(cli_main, "_is_windows", return_value=True)
+def test_verify_core_deps_skips_reinstall_when_venv_locked(_winp, tmp_path, capsys):
+    """Missing snowballstemmer must not start uv while the venv is locked."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\ndependencies = ["snowballstemmer==3.1.1"]\n',
+        encoding="utf-8",
+    )
+    venv_py = _fake_venv_python(tmp_path, windows=True)
+    heartbeat = []
+
+    def _heartbeat(*_a, **_k):
+        heartbeat.append(True)
+        raise AssertionError("uv must not start while the venv is locked")
+
+    class _Missing:
+        returncode = 0
+        stdout = "snowballstemmer\n"
+
+    with patch.object(cli_main, "PROJECT_ROOT", tmp_path), patch.object(
+        cli_main, "_resolve_install_target_python", return_value=venv_py
+    ), patch.object(
+        cli_main, "_venv_scripts_dir", return_value=venv_py.parent
+    ), patch.object(
+        cli_main,
+        "_venv_mutation_lockers",
+        return_value=(
+            [(152768, "hermes.exe", "hermes.exe proxy start --provider xai")],
+            ["Hermes_Gateway_dev"],
+        ),
+    ), patch.object(
+        cli_main, "_run_install_with_heartbeat", _heartbeat
+    ), patch.object(
+        cli_main.subprocess, "run", return_value=_Missing()
+    ):
+        with pytest.raises(cli_main.VenvLockedError):
+            cli_main._run_quarantined_install(
+                ["uv", "pip", "install", "--reinstall", "-e", "."],
+                scripts_dir=venv_py.parent,
+            )
+        cli_main._verify_core_dependencies_installed(["uv", "pip"])
+    assert heartbeat == []
+    out = capsys.readouterr().out
+    assert "Skipping dependency repair" in out
+
+
+@patch.object(cli_main, "_is_windows", return_value=True)
+def test_handoff_reap_includes_proxy(_winp):
+    """A leftover xAI proxy used to disqualify the whole handoff reap set."""
+    matches = [
+        (
+            152768,
+            "hermes.exe",
+            r"C:\h\venv\Scripts\hermes.exe proxy start --provider xai --host 127.0.0.1 --port 8645",
+        )
+    ]
+    fake_psutil = types.SimpleNamespace()
+
+    class _P:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def cmdline(self):
+            return matches[0][2].split()
+
+    fake_psutil.Process = _P
+    fake_psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+    with patch.dict(sys.modules, {"psutil": fake_psutil}):
+        pids = cli_main._handoff_reapable_backend_pids(matches)
+    assert pids == [152768]
 
 
 

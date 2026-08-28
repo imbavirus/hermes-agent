@@ -250,9 +250,9 @@ def _process_parent_name(pid: int) -> str:
 def _is_managed_service_process(cmdline: str, name: str = "", parent_name: str = "") -> bool:
     """True for NSSM/Windows-service venv pythons and profile/webui scripts.
 
-    These are not user apps. ``hermes update`` has always run with them up.
-    Listing them as 'close other processes' abort Apply is wrong — NSSM owns
-    the python child; do not ask the user to kill services.exe workers.
+    These are not user apps. Git pull may run with them up (unelevated
+    Apply must not exit 2 on NSSM/WebUI PIDs). Venv mutation must still
+    see them via ``include_managed=True`` — they lock ``.pyd`` files.
     """
     parent = str(parent_name or "").lower()
     if parent in {"services.exe", "nssm.exe"}:

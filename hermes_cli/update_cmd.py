@@ -4643,7 +4643,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
     return True, ""
 
 def _detect_venv_python_processes(
-    *, exclude_pids: set[int] | None = None
+    *, exclude_pids: set[int] | None = None, include_managed: bool = False
 ) -> list[tuple[int, str, str]]:
     """Find live processes running from the project venv's interpreter.
 
@@ -4745,9 +4745,11 @@ def _detect_venv_python_processes(
             continue
         name = info.get("name") or Path(exe).name
         # NSSM / WebUI / profile scripts are Windows services, not user
-        # apps. Overlay scanner already skips them; the CLI venv-holder
-        # guard must too — otherwise unelevated Apply skips sc.exe ACCESS_DENIED
-        # then dies exit 2 on the same PIDs (2026-08-28 20:11).
+        # apps. The *early* CLI guard (git pull) skips them so unelevated
+        # Apply is not exit-2 after sc.exe ACCESS_DENIED (2026-08-28 20:11).
+        # Venv *mutation* (uv --reinstall) must pass include_managed=True:
+        # those processes still lock .pyd files, and NSSM respawns the
+        # gateway after a child kill (2026-08-28 21:07 torn venv).
         parent_name = ""
         try:
             parent = proc.parent()
@@ -4755,15 +4757,16 @@ def _detect_venv_python_processes(
             parent_name = raw if isinstance(raw, str) else ""
         except Exception:
             parent_name = ""
-        try:
-            from hermes_cli._scan_venv_blockers import _is_managed_service_process
+        if not include_managed:
+            try:
+                from hermes_cli._scan_venv_blockers import _is_managed_service_process
 
-            if _is_managed_service_process(
-                cmdline_raw, name=str(name), parent_name=parent_name
-            ):
-                continue
-        except Exception:
-            pass
+                if _is_managed_service_process(
+                    cmdline_raw, name=str(name), parent_name=parent_name
+                ):
+                    continue
+            except Exception:
+                pass
         # Return the FULL cmdline: callers match against it (the Desktop
         # preflight's pausable-gateway exemption parses for `gateway run`).
         # Truncating here cut long managed-runtime interpreter paths before
@@ -5077,6 +5080,72 @@ def _format_venv_python_holders_message(matches: list[tuple[int, str, str]]) -> 
     lines.append("    hermes update")
     lines.append("  (or use `hermes update --force-venv` to proceed anyway at your own risk)")
     return "\n".join(lines)
+
+
+def _format_venv_mutation_lock_message(
+    holders: list[tuple[int, str, str]],
+    skipped_services: list[str] | None = None,
+) -> str:
+    """Explain why uv/pip must not rewrite the venv right now."""
+    skipped = [str(s) for s in (skipped_services or []) if s]
+    lines = [
+        "Cannot rewrite the Python venv while it is still locked on Windows.",
+        "A partial uv uninstall leaves Hermes unable to start (missing rich,",
+        "hermes_cli, pathspec, …).",
+    ]
+    if skipped:
+        lines.append(
+            "Windows gateway service(s) could not be paused "
+            f"({', '.join(skipped)}): Access is denied. NSSM keeps the "
+            "gateway mapped on .pyd files even after the child is killed."
+        )
+        lines.append(
+            "Re-run this update from an elevated terminal, or stop the "
+            f"service and retry:  nssm stop {skipped[0]}"
+        )
+    if holders:
+        shown = [h for h in holders if int(h[0]) > 0][:6]
+        if shown:
+            lines.append("Processes still using this venv:")
+            for pid, name, cmdline in shown:
+                lines.append(f"  PID {pid}  {name}  {cmdline[:120]}")
+    lines.append("Git updates can proceed; Python package installs cannot.")
+    return "\n".join(lines)
+
+
+def _venv_mutation_lockers(
+    *, gateway_resume: dict | None = None
+) -> tuple[list[tuple[int, str, str]], list[str]]:
+    """Holders that make a Windows uv/pip rewrite unsafe.
+
+    Includes NSSM/WebUI/profile scripts. If SCM stop was skipped
+    (unelevated ``sc.exe``), treat the venv as locked even when the
+    gateway child is briefly gone — NSSM will respawn it.
+    """
+    if not _m()._is_windows():
+        return [], []
+    if getattr(_m(), "_update_force_venv", False):
+        return [], []
+    resume = gateway_resume
+    if resume is None:
+        raw = getattr(_m(), "_update_gateway_resume", None)
+        resume = raw if isinstance(raw, dict) else None
+    skipped = []
+    if isinstance(resume, dict):
+        skipped = [str(s) for s in (resume.get("skipped_services") or []) if s]
+    try:
+        holders = _m()._detect_venv_python_processes(include_managed=True)
+    except Exception:
+        holders = []
+    if skipped and not holders:
+        holders = [
+            (
+                -1,
+                "nssm",
+                "unpaused Windows gateway service: " + ", ".join(skipped),
+            )
+        ]
+    return holders, skipped
 
 def _venv_launcher_ancestors(pids: list[int]) -> list[int]:
     """Return venv-interpreter ancestors of *pids* that hold the install open.
@@ -5509,8 +5578,11 @@ def _handoff_reapable_backend_pids(
         return None
 
     def _is_backend(argv_low: str) -> bool:
+        sub = _hermes_holder_subcommand(argv_low)
+        if sub in {"serve", "dashboard", "proxy"}:
+            return True
         return "hermes_cli.main" in argv_low and (
-            " serve" in argv_low or " dashboard" in argv_low
+            " serve" in argv_low or " dashboard" in argv_low or " proxy" in argv_low
         )
 
     roots: list[int] = []
@@ -7407,6 +7479,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
         pass
 
     _windows_gateway_resume = _m()._pause_windows_gateways_for_update()
+    _m()._update_gateway_resume = _windows_gateway_resume
+    _m()._update_force_venv = bool(getattr(args, "force_venv", False))
     if _windows_gateway_resume:
         import atexit as _atexit
 
@@ -7566,6 +7640,28 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     _m()._stop_process_trees(_handoff_backends)
                     _time.sleep(1.0)
                     _venv_holders = _m()._detect_venv_python_processes()
+        if _venv_holders:
+            # xAI / provider proxy holds venv\\Scripts\\hermes.exe and
+            # cryptography _rust.pyd. Desktop Apply already classifies
+            # proxy as hermes-runtime; the CLI must stop it before uv
+            # (2026-08-28 21:07: proxy started mid-update and tore the venv).
+            _proxy_pids = [
+                int(pid)
+                for pid, name, cmdline in _venv_holders
+                if _hermes_holder_subcommand(cmdline) == "proxy"
+                or (
+                    str(name).lower() in {"hermes.exe", "hermes"}
+                    and "proxy" in str(cmdline).lower()
+                )
+            ]
+            if _proxy_pids:
+                print(
+                    f"  ⚠ {len(_proxy_pids)} hermes proxy process(es) hold "
+                    "the venv; stopping them for the package update"
+                )
+                _m()._stop_process_trees(_proxy_pids)
+                _time.sleep(1.0)
+                _venv_holders = _m()._detect_venv_python_processes()
         if _venv_holders:
             print(_format_venv_python_holders_message(_venv_holders))
             _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
@@ -8519,6 +8615,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("    https://hermes-agent.nousresearch.com")
 
         node_failures = _update_node_dependencies()
+        healthy_before_web, web_detail = _venv_core_imports_healthy()
+        if not healthy_before_web:
+            print(
+                "✗ Venv is unhealthy after the dependency phase; "
+                f"skipping web UI build ({web_detail})."
+            )
+            print("  Close Hermes processes and re-run: hermes update")
+            sys.exit(1)
         _m()._build_web_ui(_m().PROJECT_ROOT / "web")
 
         desktop_build_ok = _rebuild_desktop_after_update(

@@ -5070,6 +5070,8 @@ _LAZY_COMMAND_EXPORTS = {
         "_dependency_sync_would_rewrite",
         "_detect_self_loaded_native_modules",
         "_detect_venv_python_processes",
+        "_format_venv_mutation_lock_message",
+        "_venv_mutation_lockers",
         "_desktop_owns_gateway_lifecycle",
         "_defer_update_for_self_lock",
         "_discard_lockfile_churn",
@@ -9734,6 +9736,16 @@ def _restore_quarantined_exes(moved: list[tuple[Path, Path]]) -> None:
     _early_recovery_mod.restore_quarantined_shims(moved)
 
 
+class VenvLockedError(RuntimeError):
+    """Windows venv still has processes (or an unpaused NSSM gateway) mapped.
+
+    Raised by :func:`_run_quarantined_install` BEFORE uv/pip runs. Starting
+    an uninstall while ``hermes.exe`` / ``_rust.pyd`` are locked half-removes
+    core packages (``rich``, ``hermes_cli``, ``pathspec``) and Desktop cannot
+    boot (2026-08-28 Infernos in-app update).
+    """
+
+
 class ShimQuarantineError(RuntimeError):
     """A live ``hermes*.exe`` shim could not be renamed aside (#87331).
 
@@ -9782,6 +9794,19 @@ def _run_quarantined_install(
 
     Off-Windows (``scripts_dir is None``) this is a thin pass-through.
     """
+    if scripts_dir is not None and _is_windows() and not getattr(
+        _self(), "_update_force_venv", False
+    ):
+        try:
+            holders, skipped = _self()._venv_mutation_lockers()
+            if holders or skipped:
+                raise VenvLockedError(
+                    _self()._format_venv_mutation_lock_message(holders, skipped)
+                )
+        except VenvLockedError:
+            raise
+        except Exception:
+            logger.debug("venv lock preflight failed", exc_info=True)
     moved: list[tuple[Path, Path]] = []
     failed: list[str] = []
     if scripts_dir is not None:
@@ -10234,6 +10259,10 @@ def _install_python_dependencies_with_optional_fallback(
         _install(["install", "-e", f".[{group}]"])
         _verify_console_scripts_installed(install_cmd_prefix, env=env)
         return
+    except VenvLockedError as e:
+        print("✗ Cannot install Python dependencies while the venv is locked.")
+        print(f"  {e}")
+        sys.exit(2)
     except subprocess.CalledProcessError:
         print(
             "  ⚠ Optional extras failed, reinstalling base dependencies and retrying extras individually..."
@@ -10345,8 +10374,21 @@ def _verify_console_scripts_installed(
             env=env,
             scripts_dir=scripts_dir,
         )
+    except VenvLockedError as e:
+        print("  ⚠ Skipping entry-point repair: venv is locked.")
+        print(f"    {e}")
+        return
     except subprocess.CalledProcessError as e:
         logger.warning("console script verification: repair install failed: %s", e)
+        healthy, detail = _venv_core_imports_healthy()
+        if not healthy:
+            print(
+                "✗ Entry-point repair failed and the venv is now unhealthy: "
+                f"{detail}"
+            )
+            print("  Stopping before further damage. Close Hermes processes, then:")
+            print("    hermes update")
+            sys.exit(1)
         print(
             "  ⚠ Entry point repair failed; try `hermes update --force` after "
             "closing other hermes processes."
@@ -10497,8 +10539,25 @@ def _verify_core_dependencies_installed(
         _run_quarantined_install(
             install_cmd_prefix + repair_args, env=env, scripts_dir=scripts_dir
         )
+    except VenvLockedError as e:
+        print("  ⚠ Skipping dependency repair: venv is locked.")
+        print(f"    {e}")
+        print(
+            "    Git is already updated. Re-run `hermes update` elevated "
+            "(or after `nssm stop` on the gateway) to install packages."
+        )
+        return
     except subprocess.CalledProcessError as e:
         logger.warning("dep verification: repair install failed: %s", e)
+        healthy, detail = _venv_core_imports_healthy()
+        if not healthy:
+            print(
+                "✗ Repair install failed and the venv is now unhealthy: "
+                f"{detail}"
+            )
+            print("  Stopping before further damage. Close Hermes processes, then:")
+            print("    hermes update")
+            sys.exit(1)
         print("  ⚠ Repair install failed; check `hermes update` output above.")
         return
 
