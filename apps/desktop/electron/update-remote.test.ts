@@ -23,6 +23,7 @@ import {
   canonicalGitHubRemote,
   isOfficialRemote,
   isOfficialSshRemote,
+  INFERNOS_UPDATE_CANARY,
   isSshRemote,
   OFFICIAL_REPO_CANONICAL,
   OFFICIAL_REPO_HTTPS_URL,
@@ -38,6 +39,7 @@ test('official HTTPS is imbavirus, not Nous', () => {
   assert.equal(OFFICIAL_REPO_HTTPS_URL, IMBA_HTTPS)
   assert.equal(OFFICIAL_REPO_CANONICAL, 'github.com/imbavirus/hermes-agent')
   assert.equal(canonicalGitHubRemote(OFFICIAL_REPO_HTTPS_URL), OFFICIAL_REPO_CANONICAL)
+  assert.equal(INFERNOS_UPDATE_CANARY, '2026-08-28-inapp')
 })
 
 test('canonicalGitHubRemote normalizes SSH and HTTPS forms to the same value', () => {

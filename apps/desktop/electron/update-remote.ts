@@ -17,6 +17,7 @@
 
 const OFFICIAL_REPO_HTTPS_URL = 'https://github.com/imbavirus/hermes-agent.git'
 const OFFICIAL_REPO_CANONICAL = 'github.com/imbavirus/hermes-agent'
+const INFERNOS_UPDATE_CANARY = '2026-08-28-inapp'
 
 // Normalize common GitHub remote URL forms to `host/owner/repo` (lowercased,
 // no trailing slash, no .git suffix) so SSH and HTTPS forms of the same repo
@@ -80,6 +81,7 @@ export {
   isOfficialRemote,
   isOfficialSshRemote,
   isSshRemote,
+  INFERNOS_UPDATE_CANARY,
   OFFICIAL_REPO_CANONICAL,
   OFFICIAL_REPO_HTTPS_URL,
   resolveUpdateCheckUrl
