@@ -124,3 +124,72 @@ def test_desktop_relaunch_waits_for_an_in_place_rebuild() -> None:
     assert "if ((Get-Date) -ge $relaunchDeadline)" in body
     assert "Start-Sleep -Milliseconds 500" in body
     assert "[System.Windows.Forms.Application]::DoEvents()" in body
+
+
+def test_startassigned_errors_include_win32_code() -> None:
+    """CreateProcess/Assign/Resume throws must carry GetLastWin32Error.
+
+    2026-08-28 in-app Apply: hand-off logged 'running: python ... update'
+    then immediately 'removed update marker' with no 'hermes update exit
+    code:' line. StartAssigned threw; the message was 'CreateProcess failed'
+    / 'AssignProcessToJobObject failed' with no win32 code, and the outer
+    try had no catch, so finally published the default 'update did not
+    complete'.
+    """
+    source = _read()
+    assert "Marshal.GetLastWin32Error" in source, (
+        "StartAssigned failures must include Marshal.GetLastWin32Error so "
+        "desktop-update-handoff.log names the Win32 reason instead of a "
+        "bare 'CreateProcess failed'."
+    )
+
+
+def test_assign_job_failure_does_not_kill_the_update_child() -> None:
+    """A process already in Electron's job must still run `hermes update`.
+
+    AssignProcessToJobObject to a *new* top-level job can fail when the
+    child inherited Chromium's job. Killing that child and throwing is how
+    Apply aborted in ~1s with no update. Continue without a private job.
+    """
+    source = _read()
+    assert "AssignProcessToJobObject failed" not in source, (
+        "AssignProcessToJobObject failure must not throw and TerminateProcess "
+        "the update child — that is the 1s 'update did not complete' abort."
+    )
+
+
+def test_invoke_hermes_step_falls_back_when_job_spawn_fails() -> None:
+    source = _read()
+    assert "falling back to Process.Start" in source, (
+        "Invoke-HermesStep must catch StartAssigned throws and run the "
+        "update via Process.Start instead of aborting the hand-off."
+    )
+
+
+def test_handoff_logs_update_step_exceptions_instead_of_default_message() -> None:
+    """Bare try/finally swallowed StartAssigned throws as 'update did not complete'."""
+    source = _handoff_source()
+    assert "hand-off threw:" in source, (
+        "The update try must catch and Write-HandoffLog the exception. "
+        "Without that, finally publishes the default 'update did not complete' "
+        "and desktop-update-handoff.log has no cause."
+    )
+
+
+def test_add_type_clears_stale_lib_env() -> None:
+    """User LIB=missing vcpkg path makes Add-Type fail as warning-as-error.
+
+    2026-08-28: desktop-update-handoff.log jumped from 'running: python ...
+    update' to 'removed update marker' in 1s. powershell inherited
+    LIB=C:/Users/imba/Git/vcpkg/installed/x64-windows-static/lib (User env,
+    directory gone). csc treated that as Warning-as-Error, HermesUpdateJob
+    never loaded, StartAssigned threw, finally published 'update did not
+    complete'.
+    """
+    source = _read()
+    add = source.index("Add-Type -TypeDefinition")
+    prelude = source[:add]
+    assert "Env:LIB" in prelude[prelude.rfind("HermesUpdateJob") :], (
+        "Add-Type for HermesUpdateJob must unset Env:LIB first so a stale "
+        "user LIB path cannot fail the compile and abort Apply."
+    )

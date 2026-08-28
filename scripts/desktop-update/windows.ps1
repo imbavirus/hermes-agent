@@ -749,7 +749,17 @@ function Get-StepProgressLogStamp {
 }
 
 if (-not ("HermesUpdateJob" -as [type])) {
-    Add-Type -TypeDefinition @'
+    # csc (Add-Type) treats a stale LIB/INCLUDE/LIBPATH as Warning-as-Error.
+    # User env LIB=.../vcpkg/.../lib (directory gone) made this compile fail,
+    # StartAssigned threw, Apply aborted in ~1s with 'update did not complete'.
+    $savedLib = $env:LIB
+    $savedInclude = $env:INCLUDE
+    $savedLibpath = $env:LIBPATH
+    try {
+        Remove-Item Env:LIB -ErrorAction SilentlyContinue
+        Remove-Item Env:INCLUDE -ErrorAction SilentlyContinue
+        Remove-Item Env:LIBPATH -ErrorAction SilentlyContinue
+        Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -885,10 +895,13 @@ public static class HermesUpdateJob {
             StringBuilder commandLine = new StringBuilder("\"" + executable + "\" " + arguments);
             if (!CreateProcess(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                     0x00000004 | 0x08000000, IntPtr.Zero, null, ref si, out pi))
-                throw new InvalidOperationException("CreateProcess failed");
+                throw new InvalidOperationException("CreateProcess failed win32=" + Marshal.GetLastWin32Error());
+            // Do not kill the child if it cannot join a *new* job. Electron's
+            // job (inherited via `cmd start`) can reject a second top-level
+            // job; throwing here aborted Apply in ~1s with no `hermes update`.
             if (!AssignProcessToJobObject(job, pi.Process)) {
-                TerminateProcess(pi.Process, 1);
-                throw new InvalidOperationException("AssignProcessToJobObject failed");
+                CloseHandle(job);
+                job = IntPtr.Zero;
             }
 
             Process process = Process.GetProcessById(pi.ProcessId);
@@ -905,7 +918,7 @@ public static class HermesUpdateJob {
             CloseHandle(outWrite); outWrite = IntPtr.Zero;
             CloseHandle(errWrite); errWrite = IntPtr.Zero;
             if (ResumeThread(pi.Thread) == 0xffffffff)
-                throw new InvalidOperationException("ResumeThread failed");
+                throw new InvalidOperationException("ResumeThread failed win32=" + Marshal.GetLastWin32Error());
             return new StartedProcess { Process = process, StandardOutput = stdout, StandardError = stderr, Job = job };
         } catch {
             if (pi.Process != IntPtr.Zero) TerminateProcess(pi.Process, 1);
@@ -941,6 +954,13 @@ public static class HermesUpdateJob {
     }
 }
 '@
+    } catch {
+        Write-HandoffLog ("Add-Type HermesUpdateJob failed: " + $_.Exception.Message)
+    } finally {
+        if ($null -eq $savedLib) { Remove-Item Env:LIB -ErrorAction SilentlyContinue } else { $env:LIB = $savedLib }
+        if ($null -eq $savedInclude) { Remove-Item Env:INCLUDE -ErrorAction SilentlyContinue } else { $env:INCLUDE = $savedInclude }
+        if ($null -eq $savedLibpath) { Remove-Item Env:LIBPATH -ErrorAction SilentlyContinue } else { $env:LIBPATH = $savedLibpath }
+    }
 }
 
 function Step-PipeDrain($Reader, [ref]$Task, $Buffer, $Sink, [ref]$Moved) {
@@ -997,11 +1017,17 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
     $savedPythonIoEncoding = $env:PYTHONIOENCODING
     $savedPythonUtf8 = $env:PYTHONUTF8
     $savedPythonUnbuffered = $env:PYTHONUNBUFFERED
+    $started = $null
     try {
         $env:PYTHONIOENCODING = "utf-8"
         $env:PYTHONUTF8 = "1"
         $env:PYTHONUNBUFFERED = "1"
-        $started = [HermesUpdateJob]::StartAssigned($Exe, $arguments)
+        try {
+            $started = [HermesUpdateJob]::StartAssigned($Exe, $arguments)
+        } catch {
+            Write-HandoffLog ("{0}!| StartAssigned failed: {1}; falling back to Process.Start" -f $Tag, $_.Exception.Message)
+            $started = Start-HermesStepProcess $Exe $HermesArgs
+        }
     } finally {
         if ($null -eq $savedPythonIoEncoding) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $savedPythonIoEncoding }
         if ($null -eq $savedPythonUtf8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue } else { $env:PYTHONUTF8 = $savedPythonUtf8 }
@@ -1115,8 +1141,35 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
     $all = $outText
     if ($errText) { $all += "`n" + $errText }
     $code = if ($stalled) { 124 } else { $proc.ExitCode }
-    [HermesUpdateJob]::Close($job)
+    if ("HermesUpdateJob" -as [type]) { [HermesUpdateJob]::Close($job) }
     return @{ Code = $code; Output = $all; TreeQuiesced = (-not $stalled -or $proc.HasExited); StartedAfterJobAssignment = $true }
+}
+
+function Start-HermesStepProcess([string]$Exe, [string[]]$HermesArgs) {
+    # Process.Start fallback when job-assigned CreateProcess throws.
+    # Cancellation is weaker (no private job) but the update still runs —
+    # aborting Apply with 'update did not complete' is worse.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = ($HermesArgs | ForEach-Object { '"{0}"' -f ($_ -replace '"', '\"') }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    if ($InstallRoot) { $psi.WorkingDirectory = $InstallRoot }
+    $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
+    $psi.EnvironmentVariables["PYTHONUTF8"] = "1"
+    $psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    [void]$proc.Handle
+    return [pscustomobject]@{
+        Process = $proc
+        StandardOutput = $proc.StandardOutput
+        StandardError = $proc.StandardError
+        Job = [IntPtr]::Zero
+    }
 }
 
 $finalCode = 1
@@ -1544,6 +1597,10 @@ try {
         $finalMsg = "Update failed (exit $($res.Code)). Run `hermes debug share` in a terminal to send a report."
     }
     exit $finalCode
+} catch {
+    Write-HandoffLog ("hand-off threw: " + $_.Exception.ToString())
+    $finalCode = 1
+    $finalMsg = "Update failed: $($_.Exception.Message)"
 } finally {
     # Truth ordering (sibling contract to posix.sh finish()):
     #   1. durable result + marker removal (the relaunched Desktop consumes
