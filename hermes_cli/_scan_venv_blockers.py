@@ -236,6 +236,35 @@ def _is_pausable_gateway(cmdline: str) -> bool:
     return looks_like_gateway_command_line(cmdline)
 
 
+def _process_parent_name(pid: int) -> str:
+    """Best-effort parent image name (``services.exe`` / ``nssm.exe`` / …)."""
+    try:
+        import psutil  # noqa: PLC0415
+
+        parent = psutil.Process(int(pid)).parent()
+        return (parent.name() if parent else "") or ""
+    except Exception:
+        return ""
+
+
+def _is_managed_service_process(cmdline: str, name: str = "", parent_name: str = "") -> bool:
+    """True for NSSM/Windows-service venv pythons and profile/webui scripts.
+
+    These are not user apps. ``hermes update`` has always run with them up.
+    Listing them as 'close other processes' abort Apply is wrong — NSSM owns
+    the python child; do not ask the user to kill services.exe workers.
+    """
+    parent = str(parent_name or "").lower()
+    if parent in {"services.exe", "nssm.exe"}:
+        return True
+    blob = str(cmdline or "").replace("/", "\\").lower()
+    if "hermes-webui" in blob and "server.py" in blob:
+        return True
+    if "\\profiles\\" in blob and "\\scripts\\" in blob:
+        return True
+    return False
+
+
 def _classify_hermes_runtime_cmdline(cmdline: str, name: str = "") -> dict[str, object]:
     """Return safe-to-stop metadata for this-install Hermes CLI runtime holders.
 
@@ -364,6 +393,9 @@ def main() -> None:
     processes = []
     for pid, name, cmdline in matches:
         if _is_pausable_gateway(cmdline):
+            continue
+        parent_name = _process_parent_name(pid)
+        if _is_managed_service_process(cmdline, name=name, parent_name=parent_name):
             continue
         process = {
             "pid": pid,

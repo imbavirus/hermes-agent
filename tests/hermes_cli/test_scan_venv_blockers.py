@@ -165,6 +165,45 @@ def test_classify_hermes_runtime_cmdline_rejects_unrelated_and_gateway() -> None
     )
 
 
+def test_is_managed_service_process_nssm_webui_profile_scripts() -> None:
+    from hermes_cli._scan_venv_blockers import _is_managed_service_process
+
+    assert _is_managed_service_process(
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe -u "
+        r"C:\Users\imba\hermes-webui\server.py",
+        name="python.exe",
+        parent_name="cmd.exe",
+    )
+    assert _is_managed_service_process("", name="python.exe", parent_name="services.exe")
+    assert _is_managed_service_process("", name="python.exe", parent_name="nssm.exe")
+    assert _is_managed_service_process(
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\infernos-probe-mcp.py "
+        r"--connect-timeout 20",
+        name="python.exe",
+    )
+    assert _is_managed_service_process(
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\coolify-fail-chat.py",
+        name="python.exe",
+    )
+
+
+def test_is_managed_service_process_rejects_user_repl_and_wt() -> None:
+    from hermes_cli._scan_venv_blockers import _is_managed_service_process
+
+    assert not _is_managed_service_process(
+        r"C:\x\venv\Scripts\python.exe",
+        name="python.exe",
+        parent_name="explorer.exe",
+    )
+    assert not _is_managed_service_process(
+        "python.exe important-script.py",
+        name="python.exe",
+        parent_name="WindowsTerminal.exe",
+    )
+
+
 def test_classify_venv_hermes_exe_name_is_runtime_even_with_empty_cmdline() -> None:
     from hermes_cli._scan_venv_blockers import _classify_hermes_runtime_cmdline
 
@@ -486,3 +525,55 @@ def test_main_gateway_with_long_managed_runtime_path_is_exempt(monkeypatch, caps
     assert data["blocked"] is True
     assert [p["pid"] for p in data["processes"]] == [92]
     assert len(data["processes"][0]["cmdline"]) <= 120
+
+
+def test_main_exempts_nssm_webui_profile_scripts_not_user_repl(monkeypatch, capsys):
+    """NSSM/WebUI/profile scripts are services — they must not abort Apply.
+
+    Footer Update 2026-08-28 listed python.exe PIDs 4856/19568/29392/30452/32032/35728
+    as 'close other processes'. Those are Hermes_WebUI, infernos-probe-mcp,
+    coolify-fail-chat, and empty-cmdline NSSM workers under services.exe.
+    A real user REPL still blocks.
+    """
+    import hermes_cli._scan_venv_blockers as scan
+
+    webui = (
+        29392,
+        "python.exe",
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe -u "
+        r"C:\Users\imba\hermes-webui\server.py",
+    )
+    nssm_empty = (4856, "python.exe", "")
+    probe = (
+        30452,
+        "python.exe",
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\infernos-probe-mcp.py",
+    )
+    coolify = (
+        32032,
+        "python.exe",
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\coolify-fail-chat.py",
+    )
+    repl = (56, "python.exe", r"C:\x\venv\Scripts\python.exe")
+
+    monkeypatch.setattr(
+        scan,
+        "_process_parent_name",
+        lambda pid: "services.exe" if pid == 4856 else "cmd.exe",
+    )
+
+    code, data = _run_main_with_detector(
+        monkeypatch, capsys, [webui, nssm_empty, probe, coolify]
+    )
+    assert code == 0
+    assert data["blocked"] is False
+    assert data["processes"] == []
+
+    code, data = _run_main_with_detector(
+        monkeypatch, capsys, [webui, nssm_empty, probe, coolify, repl]
+    )
+    assert code == 0
+    assert data["blocked"] is True
+    assert [p["pid"] for p in data["processes"]] == [56]
