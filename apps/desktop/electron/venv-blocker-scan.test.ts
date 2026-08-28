@@ -18,6 +18,7 @@ import {
   formatBlockerMessage,
   formatProbeFailedMessage,
   isHermesRuntimeCmdline,
+  isPackDebrisCmdline,
   parseVenvBlockerScanOutput,
   resolveVenvPython,
   scanVenvBlockers,
@@ -219,6 +220,35 @@ describe('parseVenvBlockerScanOutput', () => {
     for (const cmdline of cmdlines) {
       assert.equal(isHermesRuntimeCmdline(cmdline), false, cmdline)
     }
+  })
+
+  it('classifies leftover npm pack consoles as pack-debris', () => {
+    const cases: Array<{ cmdline: string; cwd?: string }> = [
+      {
+        cmdline: String.raw`cmd.exe /c C:\Users\imba\AppData\Local\hermes\logs\rebuild-desktop-schtask.cmd`
+      },
+      {
+        cmdline: String.raw`C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js run pack`,
+        cwd: String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent\apps\desktop`
+      },
+      {
+        cmdline: String.raw`C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js ci`,
+        cwd: String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent`
+      },
+      {
+        cmdline: String.raw`node.exe C:\Users\imba\AppData\Local\hermes\hermes-agent\apps\desktop\node_modules\electron-builder\cli.js --dir`
+      }
+    ]
+
+    for (const { cmdline, cwd } of cases) {
+      assert.equal(isPackDebrisCmdline(cmdline, cwd), true, cmdline)
+    }
+  })
+
+  it('does not treat user npm or Windows Terminal as pack-debris', () => {
+    assert.equal(isPackDebrisCmdline('npm install', String.raw`C:\Users\imba\git\infernos`), false)
+    assert.equal(isPackDebrisCmdline(String.raw`C:\Program Files\WindowsApps\...\WindowsTerminal.exe -Embedding`), false)
+    assert.equal(isPackDebrisCmdline(String.raw`C:\Windows\System32\nssm.exe`), false)
   })
 
   it('classifies venv hermes.exe shim as runtime even with empty cmdline', () => {
@@ -450,6 +480,37 @@ describe('stopHermesRuntimeBlockers', () => {
 
     assert.deepEqual(killed, [32428, 37996])
     assert.deepEqual(outcome, { stopped: [32428, 37996], failed: [] })
+  })
+
+  it('taskkills leftover pack-debris npm/cmd, not Windows Terminal', async () => {
+    const killed: number[] = []
+    const outcome = await stopHermesRuntimeBlockers(
+      {
+        blocked: true,
+        processes: [
+          {
+            pid: 187640,
+            name: 'cmd.exe',
+            cmdline: 'cmd.exe /c rebuild-desktop-schtask.cmd',
+            kind: 'pack-debris',
+            safeToStop: true
+          },
+          {
+            pid: 45840,
+            name: 'WindowsTerminal.exe',
+            cmdline: 'WindowsTerminal.exe -Embedding',
+            kind: 'other',
+            safeToStop: false
+          }
+        ]
+      },
+      async (pid) => {
+        killed.push(pid)
+      }
+    )
+
+    assert.deepEqual(killed, [187640])
+    assert.deepEqual(outcome, { stopped: [187640], failed: [] })
   })
 
   it('treats taskkill not-found as already stopped', async () => {

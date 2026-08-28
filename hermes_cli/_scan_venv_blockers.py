@@ -268,6 +268,67 @@ def _classify_hermes_runtime_cmdline(cmdline: str, name: str = "") -> dict[str, 
     return {}
 
 
+_PACK_DEBRIS_META = {"kind": "pack-debris", "safeToStop": True}
+_PACK_DEBRIS_SKIP_NAMES = {
+    "windowsterminal.exe",
+    "openconsole.exe",
+    "nssm.exe",
+    "hermes.exe",
+}
+
+
+def _classify_pack_debris_cmdline(
+    cmdline: str, name: str = "", cwd: str = ""
+) -> dict[str, object]:
+    """Leftover pack/update consoles: schtask cmd, npm/vite in this install.
+
+    Users must not be left staring at an ``npm prefix`` window after update.
+    Windows Terminal / nssm / the venv ``hermes.exe`` shim stay empty (shim
+    is classified as hermes-runtime by name).
+    """
+    if str(name).lower() in _PACK_DEBRIS_SKIP_NAMES:
+        return {}
+    blob = f"{cmdline or ''} {cwd or ''}".replace("/", "\\").lower()
+    if "rebuild-desktop-schtask.cmd" in blob:
+        return dict(_PACK_DEBRIS_META)
+    if "desktop --force-build" in blob:
+        return dict(_PACK_DEBRIS_META)
+    in_install = "hermes-agent" in blob or "apps\\desktop" in blob
+    if not in_install:
+        return {}
+    if "electron-builder" in blob:
+        return dict(_PACK_DEBRIS_META)
+    if "npm-cli.js" in blob or re.search(r"\bnpm(?:\.cmd)?\b", blob):
+        if re.search(r"\b(ci|install|run)\b", blob):
+            return dict(_PACK_DEBRIS_META)
+    return {}
+
+
+def _iter_pack_debris_processes(existing_pids: set[int]):
+    """Yield (pid, name, cmdline, meta) for leftover pack npm/cmd/node."""
+    import psutil  # noqa: PLC0415
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            pid = proc.info["pid"]
+            if pid in existing_pids:
+                continue
+            name = proc.info.get("name") or ""
+            cmd = " ".join(proc.info.get("cmdline") or [])
+        except (psutil.Error, TypeError, OSError):
+            continue
+        meta = _classify_pack_debris_cmdline(cmd, name=name, cwd="")
+        if not meta:
+            try:
+                cwd = proc.cwd()
+            except (psutil.Error, OSError, TypeError):
+                cwd = ""
+            if cwd:
+                meta = _classify_pack_debris_cmdline(cmd, name=name, cwd=cwd)
+        if meta:
+            yield pid, name, cmd, meta
+
+
 def main() -> None:
     """Entry point.  Prints one JSON doc to stdout.  Exits 0 for valid scan."""
     try:
@@ -300,6 +361,20 @@ def main() -> None:
         else:
             process.update(_local_preview_metadata(pid, name))
         processes.append(process)
+
+    seen_pids = {int(p["pid"]) for p in processes}
+    try:
+        for pid, name, cmdline, meta in _iter_pack_debris_processes(seen_pids):
+            processes.append(
+                {
+                    "pid": pid,
+                    "name": name or "unknown",
+                    "cmdline": _redact_sensitive_cmdline(cmdline)[:120],
+                    **meta,
+                }
+            )
+    except Exception:
+        pass
 
     exempted = sum(1 for _pid, _name, cmdline in matches if _is_pausable_gateway(cmdline))
     data = {

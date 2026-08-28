@@ -3894,6 +3894,8 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     Returns the ``CompletedProcess`` (with ``stdout`` populated) so the caller
     can decide whether to surface the captured output on failure.
     """
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
     result = subprocess.run(
         cmd,
         cwd=cwd,
@@ -3904,6 +3906,7 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=windows_hide_flags(),
     )
     _log_only_write(result.stdout or "")
     return result

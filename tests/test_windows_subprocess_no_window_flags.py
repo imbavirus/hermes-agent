@@ -402,6 +402,76 @@ def test_lazy_deps_uv_install_hides_console_window(monkeypatch):
 
 
 
+def test_run_npm_watching_hides_console(monkeypatch):
+    """Desktop ``npm ci`` / ``npm install`` must not open an npm-prefix window.
+
+    ``hermes desktop --force-build`` streams npm live (capture_output=False) or
+    captures it; either way Windows ``npm.cmd`` allocates a visible console
+    unless CREATE_NO_WINDOW is set so descendants inherit a hidden console.
+    """
+    from hermes_cli import main as cli_main
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
+    captured = []
+
+    def fake_run(*args, **kwargs):
+        captured.append(kwargs)
+        return subprocess.CompletedProcess(["npm", "ci"], 0, "", "")
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    cli_main._run_npm_watching_for_engine_failure(
+        ["npm", "ci"], cwd=Path("."), env={}, capture_output=True
+    )
+    assert captured, "npm install never spawned"
+    assert captured[0].get("creationflags") == windows_hide_flags()
+
+
+def test_run_npm_watching_live_popen_hides_console(monkeypatch):
+    """capture_output=False path (desktop pack) must hide the npm console too."""
+    from hermes_cli import main as cli_main
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
+    captured = []
+
+    class FakeProc:
+        stderr = None
+        def wait(self):
+            return 0
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_popen(*args, **kwargs):
+        captured.append(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(cli_main.subprocess, "Popen", fake_popen)
+    cli_main._run_npm_watching_for_engine_failure(
+        ["npm", "install"], cwd=Path("."), env={}, capture_output=False
+    )
+    assert captured, "live npm Popen never spawned"
+    assert captured[0].get("creationflags") == windows_hide_flags()
+
+
+def test_run_logged_subprocess_hides_console(monkeypatch):
+    """``hermes update`` desktop rebuild must not flash an npm/vite window."""
+    from hermes_cli._subprocess_compat import windows_hide_flags
+    from hermes_cli.update_cmd import _run_logged_subprocess
+
+    captured = []
+
+    def fake_run(*args, **kwargs):
+        captured.append(kwargs)
+        return subprocess.CompletedProcess(["npm"], 0, "ok", "")
+
+    monkeypatch.setattr("hermes_cli.update_cmd.subprocess.run", fake_run)
+    monkeypatch.setattr("hermes_cli.update_cmd._log_only_write", lambda text: None)
+    _run_logged_subprocess(["npm", "run", "pack"])
+    assert captured, "logged subprocess never spawned"
+    assert captured[0].get("creationflags") == windows_hide_flags()
+
+
 @pytest.mark.windows_only
 def test_suppress_platform_ver_console_stubs_syscmd_ver(monkeypatch):
     """``_syscmd_ver`` is replaced by an in-process echo stub so win32_ver()

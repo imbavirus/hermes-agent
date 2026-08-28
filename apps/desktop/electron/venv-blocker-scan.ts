@@ -18,7 +18,7 @@ const execFileAsync = promisify(execFile)
 // Types
 // ---------------------------------------------------------------------------
 
-export type VenvBlockerKind = 'local-preview' | 'hermes-runtime' | 'other'
+export type VenvBlockerKind = 'local-preview' | 'hermes-runtime' | 'pack-debris' | 'other'
 
 export interface VenvBlockerProcess {
   pid: number
@@ -76,6 +76,43 @@ export function isHermesRuntimeCmdline(cmdline: string): boolean {
   return /hermes(?:\.exe)?["']?\s+(?:serve|gateway|proxy)\b/i.test(c)
 }
 
+/**
+ * Leftover pack/update debris: schtask cmd, npm/vite/electron-builder in this
+ * install, leftover `desktop --force-build`. Users must not be left with
+ * random `npm prefix` consoles. Windows Terminal / nssm stay false.
+ */
+export function isPackDebrisCmdline(cmdline: string, cwd = ''): boolean {
+  const blob = `${cmdline || ''} ${cwd || ''}`.replace(/\//g, '\\').toLowerCase()
+
+  if (/(?:^|[\\/\s])(?:windowsterminal|openconsole|nssm)(?:\.exe)?(?:\s|$)/i.test(blob)) {
+    return false
+  }
+
+  if (blob.includes('rebuild-desktop-schtask.cmd')) {
+    return true
+  }
+
+  if (blob.includes('desktop --force-build')) {
+    return true
+  }
+
+  const inInstall = blob.includes('hermes-agent') || blob.includes('apps\\desktop')
+
+  if (!inInstall) {
+    return false
+  }
+
+  if (blob.includes('electron-builder')) {
+    return true
+  }
+
+  if (/\bnpm(?:\.cmd)?\b/.test(blob) || blob.includes('npm-cli.js')) {
+    return /\b(ci|install|run)\b/.test(blob)
+  }
+
+  return false
+}
+
 function classifyVenvBlocker(
   process: Pick<VenvBlockerProcess, 'pid' | 'name' | 'cmdline'>,
   hints?: Record<string, unknown>
@@ -85,6 +122,12 @@ function classifyVenvBlocker(
 
   if (trustedRuntimeIdentity || isVenvHermesShim || isHermesRuntimeCmdline(process.cmdline)) {
     return { ...process, kind: 'hermes-runtime', safeToStop: true }
+  }
+
+  const trustedPackDebris = hints?.kind === 'pack-debris' && hints.safeToStop === true
+
+  if (trustedPackDebris || isPackDebrisCmdline(process.cmdline)) {
+    return { ...process, kind: 'pack-debris', safeToStop: true }
   }
 
   const moduleMatch = process.cmdline.match(/(?:^|\s)-m\s+http\.server(?:\s+(\d{1,5}))?(?:\s|$)/i)
@@ -196,8 +239,9 @@ export function isAlreadyDeadKillError(err: unknown): boolean {
 
 /**
  * Stop this-install Hermes CLI holders (serve / gateway / proxy / leftover
- * `--force-build`). Clicking in-app Update is the consent — do not wait for
- * the local-preview `stopSafeBlockers` flag. Unrelated Python stays untouched.
+ * `--force-build`) and leftover pack debris (npm/cmd/electron-builder).
+ * Clicking in-app Update is the consent — do not wait for the local-preview
+ * `stopSafeBlockers` flag. Unrelated Python / Windows Terminal stay untouched.
  */
 export async function stopHermesRuntimeBlockers(
   result: VenvBlockerScanResult,
@@ -207,7 +251,10 @@ export async function stopHermesRuntimeBlockers(
   const failed: number[] = []
 
   for (const process of result.processes) {
-    if (process.kind !== 'hermes-runtime' || !process.safeToStop) {
+    if (
+      (process.kind !== 'hermes-runtime' && process.kind !== 'pack-debris') ||
+      !process.safeToStop
+    ) {
       continue
     }
 

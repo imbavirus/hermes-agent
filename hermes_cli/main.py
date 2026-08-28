@@ -66,7 +66,7 @@ except ModuleNotFoundError:
 # any dependency touching ``platform.uname()`` at import time flashes a
 # visible console when this process is windowless (pythonw gateway + every
 # kanban worker).  No-op on POSIX; never raises.
-from hermes_cli._subprocess_compat import suppress_platform_ver_console
+from hermes_cli._subprocess_compat import suppress_platform_ver_console, windows_hide_flags
 from hermes_cli.cli_output import line_input
 
 suppress_platform_ver_console()
@@ -6444,6 +6444,7 @@ def _run_npm_watching_for_engine_failure(
     forwarded to this process's stderr as it arrives (so live output is
     unchanged) and accumulated for the caller.
     """
+    hide = windows_hide_flags()
     if capture_output:
         return subprocess.run(
             cmd,
@@ -6454,6 +6455,7 @@ def _run_npm_watching_for_engine_failure(
             encoding="utf-8",
             errors="replace",
             check=False,
+            creationflags=hide,
         )
 
     captured: list[str] = []
@@ -6465,6 +6467,7 @@ def _run_npm_watching_for_engine_failure(
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=hide,
     ) as proc:
         if proc.stderr is not None:
             for line in proc.stderr:
@@ -8473,7 +8476,11 @@ def cmd_gui(args: argparse.Namespace):
                 if stopped:
                     print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
             build_result = subprocess.run(
-                [npm, "run", build_script], cwd=desktop_dir, env=npm_build_env, check=False
+                [npm, "run", build_script],
+                cwd=desktop_dir,
+                env=npm_build_env,
+                check=False,
+                creationflags=windows_hide_flags(),
             )
             if (
                 build_result.returncode != 0
@@ -8502,7 +8509,11 @@ def cmd_gui(args: argparse.Namespace):
                     # is still locked by a running instance; stop it before retry.
                     _stop_desktop_processes_locking_build(desktop_dir)
                     build_result = subprocess.run(
-                        [npm, "run", build_script], cwd=desktop_dir, env=npm_build_env, check=False
+                        [npm, "run", build_script],
+                        cwd=desktop_dir,
+                        env=npm_build_env,
+                        check=False,
+                        creationflags=windows_hide_flags(),
                     )
             if (
                 build_result.returncode != 0
@@ -8519,7 +8530,13 @@ def cmd_gui(args: argparse.Namespace):
                 if not _electron_dist_ok(PROJECT_ROOT):
                     _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
                 _stop_desktop_processes_locking_build(desktop_dir)
-                build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=mirror_env, check=False)
+                build_result = subprocess.run(
+                    [npm, "run", build_script],
+                    cwd=desktop_dir,
+                    env=mirror_env,
+                    check=False,
+                    creationflags=windows_hide_flags(),
+                )
             if build_result.returncode != 0:
                 print("✗ Desktop GUI build failed")
                 print(f"  Run manually:  cd apps/desktop && npm run {build_script}")

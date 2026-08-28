@@ -174,6 +174,43 @@ def test_classify_venv_hermes_exe_name_is_runtime_even_with_empty_cmdline() -> N
     }
 
 
+def test_classify_pack_debris_npm_schtask_electron_builder() -> None:
+    from hermes_cli._scan_venv_blockers import _classify_pack_debris_cmdline
+
+    assert _classify_pack_debris_cmdline(
+        r"cmd.exe /c C:\Users\imba\AppData\Local\hermes\logs\rebuild-desktop-schtask.cmd"
+    ) == {"kind": "pack-debris", "safeToStop": True}
+    assert _classify_pack_debris_cmdline(
+        r"C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js run pack",
+        name="node.exe",
+        cwd=r"C:\Users\imba\AppData\Local\hermes\hermes-agent\apps\desktop",
+    ) == {"kind": "pack-debris", "safeToStop": True}
+    assert _classify_pack_debris_cmdline(
+        r"node.exe C:\Users\imba\AppData\Local\hermes\hermes-agent\apps\desktop\node_modules\electron-builder\cli.js --dir"
+    ) == {"kind": "pack-debris", "safeToStop": True}
+
+
+def test_classify_pack_debris_rejects_user_npm_and_windows_terminal() -> None:
+    from hermes_cli._scan_venv_blockers import _classify_pack_debris_cmdline
+
+    assert (
+        _classify_pack_debris_cmdline(
+            "npm install",
+            name="npm.cmd",
+            cwd=r"C:\Users\imba\git\infernos",
+        )
+        == {}
+    )
+    assert (
+        _classify_pack_debris_cmdline(
+            r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.24.11911.0_x64__8wekyb3d8bbwe\WindowsTerminal.exe -Embedding",
+            name="WindowsTerminal.exe",
+        )
+        == {}
+    )
+    assert _classify_pack_debris_cmdline(r"C:\Windows\System32\nssm.exe", name="nssm.exe") == {}
+
+
 def test_terminate_safe_preview_revalidates_identity_and_exact_argv() -> None:
     class FakeProcess:
         def __init__(self, pid: int, *, created: float, args: list[str]) -> None:
