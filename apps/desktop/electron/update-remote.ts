@@ -1,19 +1,22 @@
 /**
  * Pure helpers for choosing a remote URL during passive update checks.
  *
- * A public install can end up with `origin=git@github.com:NousResearch/hermes-agent.git`.
- * If the user's GitHub SSH key is FIDO2/passkey-backed, a background `git fetch
- * origin` triggers an unexplained hardware-touch prompt. For passive checks
- * against the official repo we substitute the public HTTPS `ls-remote` path,
- * which needs no auth and cannot prompt. Active update/apply flows are left
- * unchanged.
+ * Infernos official tree is `imbavirus/hermes-agent`, not NousResearch.
+ * Workstations keep `origin=git@github.com:NousResearch/hermes-agent.git`
+ * and `fork=imbavirus`. A background `git fetch origin` then:
+ *   - nags "update available" on unrelated Nous commits
+ *   - with a FIDO2/passkey key, triggers an unexplained hardware-touch prompt
+ *
+ * Passive checks therefore always `ls-remote` the public HTTPS official URL
+ * (no auth, cannot prompt). Active update/apply still runs `hermes update`,
+ * which already prefers origin-if-official else `fork`.
  *
  * Extracted from main.ts so the security-critical remote detection is unit
  * testable without booting Electron (main.ts requires('electron') at load).
  */
 
-const OFFICIAL_REPO_HTTPS_URL = 'https://github.com/NousResearch/hermes-agent.git'
-const OFFICIAL_REPO_CANONICAL = 'github.com/nousresearch/hermes-agent'
+const OFFICIAL_REPO_HTTPS_URL = 'https://github.com/imbavirus/hermes-agent.git'
+const OFFICIAL_REPO_CANONICAL = 'github.com/imbavirus/hermes-agent'
 
 // Normalize common GitHub remote URL forms to `host/owner/repo` (lowercased,
 // no trailing slash, no .git suffix) so SSH and HTTPS forms of the same repo
@@ -58,8 +61,26 @@ function isSshRemote(url) {
   return value.startsWith('git@') || value.startsWith('ssh://')
 }
 
-function isOfficialSshRemote(url) {
-  return isSshRemote(url) && canonicalGitHubRemote(url) === OFFICIAL_REPO_CANONICAL
+function isOfficialRemote(url) {
+  return canonicalGitHubRemote(url) === OFFICIAL_REPO_CANONICAL
 }
 
-export { canonicalGitHubRemote, isOfficialSshRemote, isSshRemote, OFFICIAL_REPO_CANONICAL, OFFICIAL_REPO_HTTPS_URL }
+function isOfficialSshRemote(url) {
+  return isSshRemote(url) && isOfficialRemote(url)
+}
+
+// Footer / passive check target. Always official HTTPS so a Nous `origin`
+// cannot mint a false "update available" or FIDO2-prompt on fetch.
+function resolveUpdateCheckUrl(_originUrl) {
+  return OFFICIAL_REPO_HTTPS_URL
+}
+
+export {
+  canonicalGitHubRemote,
+  isOfficialRemote,
+  isOfficialSshRemote,
+  isSshRemote,
+  OFFICIAL_REPO_CANONICAL,
+  OFFICIAL_REPO_HTTPS_URL,
+  resolveUpdateCheckUrl
+}

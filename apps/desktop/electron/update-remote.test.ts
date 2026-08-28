@@ -1,18 +1,18 @@
 /**
  * Tests for electron/update-remote.ts — the remote-detection helpers that
- * keep passive update checks off the SSH origin for official installs.
+ * keep passive update checks on the Infernos official tree
+ * (imbavirus/hermes-agent) and off SSH origin.
  *
- * Run with: node --test electron/update-remote.test.ts
- * (Wired into npm test:desktop:platforms in package.json.)
+ * Run with: vitest run --project electron electron/update-remote.test.ts
  *
- * Why this matters: a public install can carry
- * origin=git@github.com:NousResearch/hermes-agent.git. A background
- * `git fetch origin` then authenticates over SSH and, with a FIDO2/passkey
- * key, triggers an unexplained hardware-touch prompt. isOfficialSshRemote
- * must reliably recognize the official SSH remote (in every URL form,
- * case-insensitively) so the caller can swap in the anonymous HTTPS path —
- * while NOT misclassifying forks, other hosts, or the HTTPS remote (which
- * never prompts and should keep the normal fetch path).
+ * Why this matters:
+ * 1. Infernos workstations keep origin=NousResearch and fork=imbavirus.
+ *    A background `git fetch origin` then nags "update available" on unrelated
+ *    Nous commits and, with a FIDO2/passkey key, triggers a hardware-touch
+ *    prompt. The footer must ls-remote official HTTPS instead.
+ * 2. isOfficialSshRemote must recognize imbavirus SSH (every URL form,
+ *    case-insensitively) so the caller can swap in the anonymous HTTPS path —
+ *    while NOT treating Nous, other forks, other hosts, or HTTPS as official SSH.
  */
 
 import assert from 'node:assert/strict'
@@ -21,21 +21,32 @@ import { test } from 'vitest'
 
 import {
   canonicalGitHubRemote,
+  isOfficialRemote,
   isOfficialSshRemote,
   isSshRemote,
   OFFICIAL_REPO_CANONICAL,
-  OFFICIAL_REPO_HTTPS_URL
+  OFFICIAL_REPO_HTTPS_URL,
+  resolveUpdateCheckUrl
 } from './update-remote'
 
+const NOUS_SSH = 'git@github.com:NousResearch/hermes-agent.git'
+const NOUS_HTTPS = 'https://github.com/NousResearch/hermes-agent.git'
+const IMBA_SSH = 'git@github.com:imbavirus/hermes-agent.git'
+const IMBA_HTTPS = 'https://github.com/imbavirus/hermes-agent.git'
+
+test('official HTTPS is imbavirus, not Nous', () => {
+  assert.equal(OFFICIAL_REPO_HTTPS_URL, IMBA_HTTPS)
+  assert.equal(OFFICIAL_REPO_CANONICAL, 'github.com/imbavirus/hermes-agent')
+  assert.equal(canonicalGitHubRemote(OFFICIAL_REPO_HTTPS_URL), OFFICIAL_REPO_CANONICAL)
+})
+
 test('canonicalGitHubRemote normalizes SSH and HTTPS forms to the same value', () => {
-  assert.equal(canonicalGitHubRemote('git@github.com:NousResearch/hermes-agent.git'), OFFICIAL_REPO_CANONICAL)
-  assert.equal(canonicalGitHubRemote('git@github.com:NousResearch/hermes-agent'), OFFICIAL_REPO_CANONICAL)
-  assert.equal(canonicalGitHubRemote('ssh://git@github.com/NousResearch/hermes-agent.git'), OFFICIAL_REPO_CANONICAL)
-  assert.equal(canonicalGitHubRemote('https://github.com/NousResearch/hermes-agent.git'), OFFICIAL_REPO_CANONICAL)
-  // Case-insensitive: an uppercased owner still canonicalizes to the same repo.
-  assert.equal(canonicalGitHubRemote('git@github.com:nousresearch/hermes-agent.git'), OFFICIAL_REPO_CANONICAL)
-  // Trailing slashes are stripped.
-  assert.equal(canonicalGitHubRemote('https://github.com/NousResearch/hermes-agent/'), OFFICIAL_REPO_CANONICAL)
+  assert.equal(canonicalGitHubRemote(IMBA_SSH), OFFICIAL_REPO_CANONICAL)
+  assert.equal(canonicalGitHubRemote('git@github.com:imbavirus/hermes-agent'), OFFICIAL_REPO_CANONICAL)
+  assert.equal(canonicalGitHubRemote('ssh://git@github.com/imbavirus/hermes-agent.git'), OFFICIAL_REPO_CANONICAL)
+  assert.equal(canonicalGitHubRemote(IMBA_HTTPS), OFFICIAL_REPO_CANONICAL)
+  assert.equal(canonicalGitHubRemote('git@github.com:IMBAVIRUS/hermes-agent.git'), OFFICIAL_REPO_CANONICAL)
+  assert.equal(canonicalGitHubRemote('https://github.com/imbavirus/hermes-agent/'), OFFICIAL_REPO_CANONICAL)
 })
 
 test('canonicalGitHubRemote is empty for falsy input', () => {
@@ -45,35 +56,47 @@ test('canonicalGitHubRemote is empty for falsy input', () => {
 })
 
 test('isSshRemote detects scp-like and ssh:// forms only', () => {
-  assert.equal(isSshRemote('git@github.com:NousResearch/hermes-agent.git'), true)
-  assert.equal(isSshRemote('ssh://git@github.com/NousResearch/hermes-agent.git'), true)
-  assert.equal(isSshRemote('https://github.com/NousResearch/hermes-agent.git'), false)
+  assert.equal(isSshRemote(IMBA_SSH), true)
+  assert.equal(isSshRemote(NOUS_SSH), true)
+  assert.equal(isSshRemote('ssh://git@github.com/imbavirus/hermes-agent.git'), true)
+  assert.equal(isSshRemote(IMBA_HTTPS), false)
   assert.equal(isSshRemote(''), false)
   assert.equal(isSshRemote(null), false)
 })
 
-test('isOfficialSshRemote is true only for the official repo over SSH', () => {
-  assert.equal(isOfficialSshRemote('git@github.com:NousResearch/hermes-agent.git'), true)
-  assert.equal(isOfficialSshRemote('git@github.com:NousResearch/hermes-agent'), true)
-  assert.equal(isOfficialSshRemote('ssh://git@github.com/NousResearch/hermes-agent.git'), true)
-  // Case-insensitive owner/repo match.
-  assert.equal(isOfficialSshRemote('git@github.com:nousresearch/hermes-agent.git'), true)
+test('isOfficialRemote is true only for imbavirus/hermes-agent', () => {
+  assert.equal(isOfficialRemote(IMBA_HTTPS), true)
+  assert.equal(isOfficialRemote(IMBA_SSH), true)
+  assert.equal(isOfficialRemote('https://github.com/imbavirus/hermes-agent'), true)
+  assert.equal(isOfficialRemote(NOUS_HTTPS), false)
+  assert.equal(isOfficialRemote(NOUS_SSH), false)
+  assert.equal(isOfficialRemote('git@github.com:someuser/hermes-agent.git'), false)
+  assert.equal(isOfficialRemote(''), false)
+  assert.equal(isOfficialRemote(null), false)
 })
 
-test('isOfficialSshRemote does NOT match forks, other hosts, or HTTPS', () => {
-  // A fork over SSH belongs to the user — fetching it is their own remote,
-  // not the official upstream, so the SSH-avoidance swap must not apply.
+test('isOfficialSshRemote is true only for imbavirus over SSH', () => {
+  assert.equal(isOfficialSshRemote(IMBA_SSH), true)
+  assert.equal(isOfficialSshRemote('git@github.com:imbavirus/hermes-agent'), true)
+  assert.equal(isOfficialSshRemote('ssh://git@github.com/imbavirus/hermes-agent.git'), true)
+  assert.equal(isOfficialSshRemote('git@github.com:IMBAVIRUS/hermes-agent.git'), true)
+})
+
+test('isOfficialSshRemote does NOT match Nous, forks, other hosts, or HTTPS', () => {
+  assert.equal(isOfficialSshRemote(NOUS_SSH), false)
   assert.equal(isOfficialSshRemote('git@github.com:someuser/hermes-agent.git'), false)
-  // Same repo name on a different host is not the official repo.
-  assert.equal(isOfficialSshRemote('git@gitlab.com:NousResearch/hermes-agent.git'), false)
-  // HTTPS to the official repo never prompts for SSH/FIDO2, so it keeps the
-  // normal fetch path — must not be flagged as an official SSH remote.
-  assert.equal(isOfficialSshRemote('https://github.com/NousResearch/hermes-agent.git'), false)
+  assert.equal(isOfficialSshRemote('git@gitlab.com:imbavirus/hermes-agent.git'), false)
+  assert.equal(isOfficialSshRemote(IMBA_HTTPS), false)
+  assert.equal(isOfficialSshRemote(NOUS_HTTPS), false)
   assert.equal(isOfficialSshRemote(''), false)
   assert.equal(isOfficialSshRemote(null), false)
 })
 
-test('OFFICIAL_REPO_HTTPS_URL canonicalizes to OFFICIAL_REPO_CANONICAL', () => {
-  // Invariant: the URL we substitute in must be the same repo we detect.
-  assert.equal(canonicalGitHubRemote(OFFICIAL_REPO_HTTPS_URL), OFFICIAL_REPO_CANONICAL)
+test('passive check URL is official HTTPS even when origin is Nous', () => {
+  assert.equal(resolveUpdateCheckUrl(NOUS_SSH), IMBA_HTTPS)
+  assert.equal(resolveUpdateCheckUrl(NOUS_HTTPS), IMBA_HTTPS)
+  assert.equal(resolveUpdateCheckUrl(IMBA_SSH), IMBA_HTTPS)
+  assert.equal(resolveUpdateCheckUrl(IMBA_HTTPS), IMBA_HTTPS)
+  assert.equal(resolveUpdateCheckUrl(''), IMBA_HTTPS)
+  assert.equal(resolveUpdateCheckUrl(null), IMBA_HTTPS)
 })
