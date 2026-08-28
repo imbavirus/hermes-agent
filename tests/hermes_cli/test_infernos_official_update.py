@@ -189,3 +189,41 @@ def test_asar_missing_infernos_bots_false_when_packed(tmp_path):
     plugin.write_bytes(b"function membersOwedMentionTurn(log, members) {}\n")
     asar.write_bytes(b"xxxx membersOwedMentionTurn yyyy\n")
     assert hm._asar_missing_infernos_bots(asar, plugin) is False
+
+
+ROOT = Path(__file__).resolve().parents[2]
+IMBA_HTTPS = "https://github.com/imbavirus/hermes-agent.git"
+IMBA_SSH = "git@github.com:imbavirus/hermes-agent.git"
+IMBA_INSTALL_SH = "https://raw.githubusercontent.com/imbavirus/hermes-agent/main/scripts/install.sh"
+IMBA_INSTALL_PS1 = "https://raw.githubusercontent.com/imbavirus/hermes-agent/main/scripts/install.ps1"
+
+
+def test_install_sh_clones_imbavirus_not_nous():
+    text = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    assert f'REPO_URL_HTTPS="{IMBA_HTTPS}"' in text
+    assert f'REPO_URL_SSH="{IMBA_SSH}"' in text
+    assert 'REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"' not in text
+    assert 'REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"' not in text
+
+
+def test_install_ps1_clones_imbavirus_not_nous():
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert f'$RepoUrlHttps = "{IMBA_HTTPS}"' in text
+    assert f'$RepoUrlSsh = "{IMBA_SSH}"' in text
+    assert "github.com/NousResearch/hermes-agent" not in text
+
+
+def test_readme_install_one_liners_use_this_fork():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert IMBA_INSTALL_SH in text
+    assert IMBA_INSTALL_PS1 in text
+    assert "hermes-agent.nousresearch.com/install.sh" not in text
+    assert "hermes-agent.nousresearch.com/install.ps1" not in text
+
+
+def test_readme_upgrade_retargets_origin_to_imbavirus():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"git remote set-url origin {IMBA_HTTPS}" in text
+    desktop = (ROOT / "apps" / "desktop" / "README.md").read_text(encoding="utf-8")
+    assert "imbavirus/hermes-agent" in desktop
+    assert "hermes-agent.nousresearch.com/install" not in desktop

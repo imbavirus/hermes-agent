@@ -40,11 +40,11 @@ Prebuilt installers are built and distributed via [the Hermes Desktop website.](
 
 ## Updating
 
-**This fork is [imbavirus/hermes-agent](https://github.com/imbavirus/hermes-agent).** The in-app update button and `hermes update` only pull Infernos Bot Mode if git `origin` (or `fork`) is that repo — not `NousResearch/hermes-agent`.
+**This fork is [imbavirus/hermes-agent](https://github.com/imbavirus/hermes-agent).** After `origin` points at that repo, the in-app Update button and `hermes update` both follow **our** `main` — we decide when updates ship. They will **not** pull Infernos Bot Mode while `origin` is still `NousResearch/hermes-agent`.
 
 `git log` matching `main` is **not** enough. Group rooms / `@mentions` / Close / End are packed into `app.asar` (renderer also under `app.asar.unpacked/dist`). Checkout does not replace a running or Start Menu `Hermes.exe`.
 
-Full guide (quit → retarget remotes → `hermes update` / `--force-build` → launch `win-unpacked\Hermes.exe` → proof strings, plus the Win11 uv trampoline repair): **[Upgrade Hermes Desktop](../../README.md#upgrade-hermes-desktop-this-fork)** in the repo README.
+Full guide (quit → `git remote set-url origin` to imbavirus → `hermes update` / `--force-build` → launch `win-unpacked\Hermes.exe` → proof strings, plus the Win11 uv trampoline repair): **[Upgrade Hermes Desktop](../../README.md#upgrade-hermes-desktop-this-fork)** in the repo README.
 
 ```bash
 # fully quit Desktop first

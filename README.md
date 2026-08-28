@@ -37,7 +37,7 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 ### Linux, macOS, WSL2, Termux
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/imbavirus/hermes-agent/main/scripts/install.sh | bash
 ```
 
 ### Windows (native, PowerShell)
@@ -47,7 +47,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 Run this in PowerShell:
 
 ```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+iex (irm https://raw.githubusercontent.com/imbavirus/hermes-agent/main/scripts/install.ps1)
 ```
 
 The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
@@ -104,7 +104,9 @@ For more context, see the upstream Astral reports: [astral-sh/uv#13553](https://
 
 ## Upgrade Hermes Desktop (this fork)
 
-This GitHub repo is **[imbavirus/hermes-agent](https://github.com/imbavirus/hermes-agent)**, not Nous. If you installed Desktop with the public Nous one-liner, `hermes update` will keep tracking Nous and you will **not** get Infernos Bot Mode (group rooms, `@mentions`, Close / End).
+This GitHub repo is **[imbavirus/hermes-agent](https://github.com/imbavirus/hermes-agent)**. The Quick Install one-liners above clone **this** fork. The public Nous installer (`hermes-agent.nousresearch.com`) will **not** get Infernos Bot Mode (group rooms, `@mentions`, Close / End).
+
+**Existing Desktop** installed from Nous: retarget git `origin` to this fork so the in-app Update button **and** `hermes update` follow **our** `main`. We decide when updates ship.
 
 **`git log` is not the running app.** Bot Mode is packed into `app.asar` / `app.asar.unpacked`. A machine can be on the right SHA and still show stock Desktop until you rebuild and launch **that** `Hermes.exe`.
 
@@ -115,25 +117,24 @@ Checkout (macOS/Linux): `~/.hermes/hermes-agent`
 
 Quit every `Hermes.exe` / `Hermes` window. Packing while the app is open dies `EBUSY` on `v8_context_snapshot.bin` and leaves yesterday’s asar in place.
 
-### 2. Point git at this fork
+### 2. Point git `origin` at this fork
+
+Do **not** `git reset --hard origin/main` while `origin` is still NousResearch — that wipes Infernos commits.
 
 ```powershell
 cd $env:LOCALAPPDATA\hermes\hermes-agent
-git remote -v
-```
-
-| `origin` | What to do |
-|---|---|
-| `imbavirus/hermes-agent` | Skip to step 3 |
-| `NousResearch/hermes-agent` | `git remote add fork https://github.com/imbavirus/hermes-agent.git` (or `git remote set-url origin` to the same URL). Do **not** `hermes update` while origin is still Nous — it will skip or overwrite Infernos commits |
-
-```powershell
-git fetch origin   # or: git fetch fork
+git remote set-url origin https://github.com/imbavirus/hermes-agent.git
+git remote add upstream https://github.com/NousResearch/hermes-agent.git
+git fetch origin
 git checkout main
-git reset --hard origin/main   # or: fork/main
+git reset --hard origin/main
 git log -1 --oneline
 # expect imbavirus main (Bot Mode lives in apps/desktop/src/plugins/hermes-bots/plugin.js)
 ```
+
+`git remote add upstream` errors with “already exists” if you already have it — ignore that.
+
+macOS/Linux: same commands from `~/.hermes/hermes-agent` (or `$HERMES_HOME/hermes-agent`).
 
 ### 3. Update and rebuild the packed app
 
@@ -310,7 +311,7 @@ full git checkout it creates at `$HERMES_HOME/hermes-agent` (usually
 managed venv, lazy dependencies, gateway, and docs tooling.
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/imbavirus/hermes-agent/main/scripts/install.sh | bash
 cd "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"
 uv pip install -e ".[all,dev]"
 scripts/run_tests.sh
