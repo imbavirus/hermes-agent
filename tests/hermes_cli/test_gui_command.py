@@ -110,13 +110,16 @@ def test_gui_installs_packages_and_launches_desktop_app(tmp_path, monkeypatch):
     launch_ok = subprocess.CompletedProcess([str(packaged_exe)], 0)
 
     with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._resolve_node_runtime_npm", return_value="/usr/bin/npm"), \
          patch("hermes_cli.main._run_npm_install_deterministic", return_value=install_ok) as mock_install, \
          patch("hermes_cli.main._desktop_build_needed", return_value=True), \
          patch("hermes_cli.main._write_desktop_build_stamp"), \
          patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
          patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
          patch("hermes_cli.main._register_linux_desktop_entry"), \
+         patch("hermes_cli.main._ensure_desktop_exe_launchable", return_value=(packaged_exe, False)), \
          patch("hermes_cli.main.subprocess.run", side_effect=[pack_ok, launch_ok]) as mock_run, \
+         patch("hermes_cli.main.subprocess.Popen", return_value=type("P", (), {"pid": 182884})()) as mock_popen, \
          pytest.raises(SystemExit) as exc:
         cli_main.cmd_gui(_ns())
 
@@ -130,8 +133,11 @@ def test_gui_installs_packages_and_launches_desktop_app(tmp_path, monkeypatch):
     assert install_env is not None and "PATH" in install_env
     assert mock_run.call_args_list[0].args[0] == ["/usr/bin/npm", "run", "pack"]
     assert mock_run.call_args_list[0].kwargs["cwd"] == desktop_dir
-    assert mock_run.call_args_list[1].args[0] == [str(packaged_exe)]
-    assert mock_run.call_args_list[1].kwargs["cwd"] == desktop_dir
+    launched = mock_popen.call_args.kwargs.get("args") or (
+        mock_popen.call_args.args[0] if mock_popen.call_args.args else None
+    )
+    assert launched == [str(packaged_exe)]
+    assert mock_popen.call_args.kwargs["cwd"] == desktop_dir
 
 
 def test_gui_npm_pack_hides_console(tmp_path, monkeypatch):
@@ -156,6 +162,7 @@ def test_gui_npm_pack_hides_console(tmp_path, monkeypatch):
          patch("hermes_cli.main._register_linux_desktop_entry"), \
          patch("hermes_cli.main._ensure_desktop_exe_launchable", return_value=(packaged_exe, False)), \
          patch("hermes_cli.main.subprocess.run", side_effect=[pack_ok, launch_ok]) as mock_run, \
+         patch("hermes_cli.main.subprocess.Popen", return_value=type("P", (), {"pid": 1})()), \
          pytest.raises(SystemExit) as exc:
         cli_main.cmd_gui(_ns())
 
@@ -164,6 +171,42 @@ def test_gui_npm_pack_hides_console(tmp_path, monkeypatch):
     assert mock_run.call_args_list[0].args[0] == ["/usr/bin/npm", "run", "pack"]
     assert pack_kwargs["cwd"] == desktop_dir
     assert pack_kwargs.get("creationflags") == windows_hide_flags()
+
+
+def test_gui_packaged_launch_exits_shim_without_waiting(tmp_path, monkeypatch):
+    """Packed Hermes.exe must not be subprocess.run()'d by venv hermes.exe.
+
+    Waiting maps venv\\Scripts\\hermes.exe for the whole GUI lifetime. In-app
+    Update then taskkill /T the leftover --force-build parent and suicides.
+    """
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    packaged_exe = _make_packaged_executable(root, monkeypatch)
+
+    install_ok = subprocess.CompletedProcess(["npm", "ci"], 0)
+    pack_ok = subprocess.CompletedProcess(["npm", "run", "pack"], 0)
+    fake = subprocess.Popen.__new__(subprocess.Popen)
+    fake.pid = 182884
+
+    with patch("hermes_cli.main._resolve_node_runtime_npm", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._run_npm_install_deterministic", return_value=install_ok), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.main._write_desktop_build_stamp"), \
+         patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
+         patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
+         patch("hermes_cli.main._register_linux_desktop_entry"), \
+         patch("hermes_cli.main._ensure_desktop_exe_launchable", return_value=(packaged_exe, False)), \
+         patch("hermes_cli.main.subprocess.run", return_value=pack_ok) as mock_run, \
+         patch("hermes_cli.main.subprocess.Popen", return_value=fake) as mock_popen, \
+         pytest.raises(SystemExit) as exc:
+        cli_main.cmd_gui(_ns())
+
+    assert exc.value.code == 0
+    mock_popen.assert_called_once()
+    launched = mock_popen.call_args.kwargs.get("args") or mock_popen.call_args.args[0]
+    assert launched == [str(packaged_exe)]
+    for call in mock_run.call_args_list:
+        assert call.args[0] != [str(packaged_exe)]
 
 
 def test_gui_install_env_prepends_managed_node_on_bare_path(tmp_path, monkeypatch):
@@ -1073,7 +1116,7 @@ def test_gui_bridges_ozone_hint_to_launch_env(tmp_path, monkeypatch):
     ``ELECTRON_OZONE_PLATFORM_HINT`` on the launched Electron process."""
     root = _make_desktop_tree(tmp_path)
     monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
-    _make_packaged_executable(root, monkeypatch)
+    packaged_exe = _make_packaged_executable(root, monkeypatch)
 
     ok = subprocess.CompletedProcess([], 0)
     cfg = {"desktop": {"ozone_platform_hint": "x11"}}
@@ -1084,13 +1127,15 @@ def test_gui_bridges_ozone_hint_to_launch_env(tmp_path, monkeypatch):
          patch("hermes_cli.main._write_desktop_build_stamp"), \
          patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
          patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
+         patch("hermes_cli.main._ensure_desktop_exe_launchable", return_value=(packaged_exe, False)), \
          patch("hermes_cli.config.load_config", return_value=cfg), \
          patch("hermes_cli.linux_desktop_entry.install_desktop_entry", return_value=None), \
          patch("hermes_cli.main.subprocess.run", side_effect=[ok, ok]) as mock_run, \
+         patch("hermes_cli.main.subprocess.Popen", return_value=type("P", (), {"pid": 1})()) as mock_popen, \
          pytest.raises(SystemExit):
         cli_main.cmd_gui(_ns())
 
-    launch_env = mock_run.call_args_list[1].kwargs["env"]
+    launch_env = mock_popen.call_args.kwargs["env"]
     assert launch_env.get("ELECTRON_OZONE_PLATFORM_HINT") == "x11"
 
     monkeypatch.setenv("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
@@ -1100,13 +1145,15 @@ def test_gui_bridges_ozone_hint_to_launch_env(tmp_path, monkeypatch):
          patch("hermes_cli.main._write_desktop_build_stamp"), \
          patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
          patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
+         patch("hermes_cli.main._ensure_desktop_exe_launchable", return_value=(packaged_exe, False)), \
          patch("hermes_cli.config.load_config", return_value=cfg), \
          patch("hermes_cli.linux_desktop_entry.install_desktop_entry", return_value=None), \
          patch("hermes_cli.main.subprocess.run", side_effect=[ok, ok]) as mock_run2, \
+         patch("hermes_cli.main.subprocess.Popen", return_value=type("P", (), {"pid": 1})()) as mock_popen2, \
          pytest.raises(SystemExit):
         cli_main.cmd_gui(_ns())
 
-    launch_env = mock_run2.call_args_list[1].kwargs["env"]
+    launch_env = mock_popen2.call_args.kwargs["env"]
     assert launch_env.get("ELECTRON_OZONE_PLATFORM_HINT") == "wayland"
 
 

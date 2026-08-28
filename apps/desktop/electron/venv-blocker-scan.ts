@@ -224,10 +224,17 @@ async function defaultKillHermesRuntimePid(pid: number): Promise<void> {
     return
   }
 
-  await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+  await execFileAsync('taskkill', shimHolderTaskkillArgs(pid), {
     windowsHide: true,
     timeout: 10_000
   })
+}
+
+/** taskkill args for venv\\Scripts\\hermes.exe holders. Never /T — a leftover
+ *  `desktop --force-build` is the parent of packed Hermes.exe; tree-kill
+ *  suicides in-app Update before hand-off. */
+export function shimHolderTaskkillArgs(pid: number): string[] {
+  return ['/PID', String(pid), '/F']
 }
 
 export function isAlreadyDeadKillError(err: unknown): boolean {

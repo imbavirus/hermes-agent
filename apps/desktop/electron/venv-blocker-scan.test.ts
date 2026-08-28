@@ -22,6 +22,7 @@ import {
   parseVenvBlockerScanOutput,
   resolveVenvPython,
   scanVenvBlockers,
+  shimHolderTaskkillArgs,
   stopHermesRuntimeBlockers,
   stopSafeVenvBlockers
 } from './venv-blocker-scan'
@@ -536,5 +537,18 @@ describe('stopHermesRuntimeBlockers', () => {
     )
 
     assert.deepEqual(outcome, { stopped: [21104], failed: [] })
+  })
+})
+
+describe('shimHolderTaskkillArgs', () => {
+  it('kills the shim PID only — no /T (leftover --force-build is parent of Desktop)', () => {
+    // 2026-08-28: hermes.exe desktop --force-build subprocess.run()'s the
+    // packed Hermes.exe, so the shim stays parent of this window. Apply then
+    // taskkill /T that PID and suicides before hand-off. Never tree-kill
+    // venv\\Scripts\\hermes.exe holders.
+    const args = shimHolderTaskkillArgs(46980)
+
+    assert.deepEqual(args, ['/PID', '46980', '/F'])
+    assert.ok(!args.includes('/T'))
   })
 })

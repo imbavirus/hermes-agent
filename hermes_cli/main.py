@@ -8324,6 +8324,31 @@ def _register_linux_desktop_entry() -> None:
         print(f"⚠ Could not install the desktop launcher entry: {exc}")
 
 
+def _spawn_packaged_desktop(launch_command: list[str], *, cwd, env) -> int:
+    """Start packed Hermes.exe and return immediately.
+
+    ``subprocess.run`` kept ``venv\\Scripts\\hermes.exe`` mapped for the whole
+    GUI lifetime. In-app Update then ``taskkill /T`` that leftover
+    ``desktop --force-build`` parent and suicides before hand-off.
+    """
+    kwargs: dict = {
+        "args": launch_command,
+        "cwd": cwd,
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        # GUI exe: DETACHED_PROCESS is fine (not npm.cmd). Do not wait.
+        kwargs["creationflags"] = 0x00000200 | 0x00000008  # NEW_GROUP | DETACHED
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(**kwargs)
+    return int(proc.pid or 0)
+
+
 def cmd_gui(args: argparse.Namespace):
     """Build and launch the native Electron desktop GUI."""
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
@@ -8617,8 +8642,9 @@ def cmd_gui(args: argparse.Namespace):
 
     launch_command.extend(config_electron_flags)
     print(f"→ Launching packaged Hermes Desktop: {' '.join(launch_command)}")
-    launch_result = subprocess.run(launch_command, cwd=desktop_dir, env=env, check=False)
-    sys.exit(launch_result.returncode)
+    pid = _spawn_packaged_desktop(launch_command, cwd=desktop_dir, env=env)
+    print(f"→ Desktop pid {pid} (venv hermes.exe exiting so the shim is not held)")
+    sys.exit(0)
 
 
 # Dashboard process-hygiene helpers live in hermes_cli/dashboard_procs.py

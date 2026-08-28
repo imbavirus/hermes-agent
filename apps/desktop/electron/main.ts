@@ -3141,6 +3141,24 @@ function forceKillProcessTree(pid) {
   }
 }
 
+/** Kill a venv hermes.exe holder without /T. Tree-kill of leftover
+ *  `desktop --force-build` is parent of this window and suicides Apply. */
+function killShimHolderNoTree(pid) {
+  if (!IS_WINDOWS) {
+    return
+  }
+
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return
+  }
+
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/F'], hiddenWindowsChildOptions({ stdio: 'ignore' }))
+  } catch {
+    void 0
+  }
+}
+
 function writeBackendOwnership(contents) {
   fs.mkdirSync(path.dirname(DESKTOP_BACKEND_OWNERSHIP_PATH), { recursive: true })
   const tempPath = `${DESKTOP_BACKEND_OWNERSHIP_PATH}.${process.pid}.tmp`
@@ -3505,11 +3523,11 @@ async function releaseBackendLock(updateRoot, tag) {
         const pids = await listShimHolderPids(updateRoot, shim)
 
         for (const pid of pids) {
-          forceKillProcessTree(pid)
+          killShimHolderNoTree(pid)
         }
 
         if (pids.length) {
-          rememberLog(`[${tag}] reaped shim holders during wait: ${pids.join(',')}`)
+          rememberLog(`[${tag}] reaped shim holders during wait (no /T): ${pids.join(',')}`)
         }
       },
       sleep: (ms: number) => new Promise(r => setTimeout(r, ms)),

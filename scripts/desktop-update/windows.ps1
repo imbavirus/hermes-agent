@@ -1419,6 +1419,18 @@ try {
                 $unlocked = $true
                 break
             } catch {
+                # Kill leftover venv\Scripts\hermes.exe holders (proxy / --force-build)
+                # WITHOUT -tree: that process is often the parent of Desktop.
+                try {
+                    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $shim) } |
+                        ForEach-Object {
+                            if ($_.ProcessId -ne $PID -and $_.ProcessId -ne $DesktopPid) {
+                                Write-HandoffLog "killing shim holder pid $($_.ProcessId) (no tree)"
+                                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                } catch { }
                 Start-Sleep -Milliseconds 400
                 if ($script:Ui) { [System.Windows.Forms.Application]::DoEvents() }
             }
