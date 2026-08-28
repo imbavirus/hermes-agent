@@ -379,6 +379,7 @@ import {
   formatBlockerMessage,
   formatProbeFailedMessage,
   scanVenvBlockers,
+  stopHermesRuntimeBlockers,
   stopSafeVenvBlockers
 } from './venv-blocker-scan'
 import { fetchMarketplaceThemes, searchMarketplaceThemes } from './vscode-marketplace'
@@ -3638,6 +3639,23 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
     // Emergency backup and header verification before the update touches
     // anything.  Runs while the backend is still alive.
     preflightStateDb(HERMES_HOME, rememberLog)
+
+    // Sibling profile serves / leftover `hermes desktop --force-build` / proxy
+    // hold venv\Scripts\hermes.exe. releaseBackendLock only kills THIS window's
+    // tracked backends, so those holders abort the hand-off after 15s. Stop
+    // classified hermes-runtime first — clicking Update is the consent.
+    if (IS_WINDOWS) {
+      const preScan = await scanVenvBlockers(updateRoot)
+
+      if (preScan.kind === 'blocked') {
+        const stopResult = await stopHermesRuntimeBlockers(preScan.result)
+
+        rememberLog(
+          `[updates] stopped hermes-runtime holders: stopped=${stopResult.stopped.join(',') || 'none'} failed=${stopResult.failed.join(',') || 'none'}`
+        )
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+    }
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked

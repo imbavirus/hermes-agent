@@ -129,6 +129,42 @@ def test_classify_local_preview_args_rejects_module_flags_passed_to_a_script() -
     ) == {}
 
 
+def test_classify_hermes_runtime_cmdline_force_build_serve_proxy() -> None:
+    from hermes_cli._scan_venv_blockers import _classify_hermes_runtime_cmdline
+
+    cases = [
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe desktop --force-build",
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"-m hermes_cli.main --profile dev serve --host 127.0.0.1 --port 0",
+        r'"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe" '
+        r'"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe" '
+        r"proxy start --provider xai --host 127.0.0.1 --port 8645",
+    ]
+    for cmdline in cases:
+        assert _classify_hermes_runtime_cmdline(cmdline) == {
+            "kind": "hermes-runtime",
+            "safeToStop": True,
+        }, cmdline
+
+
+def test_classify_hermes_runtime_cmdline_rejects_unrelated_and_gateway() -> None:
+    from hermes_cli._scan_venv_blockers import _classify_hermes_runtime_cmdline
+
+    assert _classify_hermes_runtime_cmdline(
+        r"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe "
+        r"C:\Users\imba\hermes-webui\server.py"
+    ) == {}
+    assert _classify_hermes_runtime_cmdline("python.exe important-script.py") == {}
+    # Gateways stay pausable/exempt — updater pauses them; do not mark runtime.
+    assert (
+        _classify_hermes_runtime_cmdline(
+            r"C:\x\venv\Scripts\python.exe -m hermes_cli.main gateway run --replace"
+        )
+        == {}
+    )
+
+
 def test_terminate_safe_preview_revalidates_identity_and_exact_argv() -> None:
     class FakeProcess:
         def __init__(self, pid: int, *, created: float, args: list[str]) -> None:
@@ -336,6 +372,8 @@ def test_main_desktop_serve_backend_still_blocks(monkeypatch, capsys):
     assert code == 0
     assert data["blocked"] is True
     assert [p["pid"] for p in data["processes"]] == [78]
+    assert data["processes"][0]["kind"] == "hermes-runtime"
+    assert data["processes"][0]["safeToStop"] is True
     assert data["pausable_gateways"] == 0
 
 def test_main_gateway_with_long_managed_runtime_path_is_exempt(monkeypatch, capsys):

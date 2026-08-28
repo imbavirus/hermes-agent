@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from pathlib import PureWindowsPath
 from typing import NoReturn
@@ -234,6 +235,35 @@ def _is_pausable_gateway(cmdline: str) -> bool:
     return looks_like_gateway_command_line(cmdline)
 
 
+def _classify_hermes_runtime_cmdline(cmdline: str) -> dict[str, object]:
+    """Return safe-to-stop metadata for this-install Hermes CLI runtime holders.
+
+    ``serve`` / leftover ``desktop --force-build`` / ``proxy`` hold
+    ``venv\\Scripts\\hermes.exe`` on Windows and abort in-app Update after 15s.
+    Pausable gateways stay empty so the existing exemption still applies.
+    """
+    if not isinstance(cmdline, str) or not cmdline:
+        return {}
+    if _is_pausable_gateway(cmdline):
+        return {}
+
+    low = cmdline.lower()
+    if "hermes_cli.main" in low:
+        if "desktop --force-build" in low:
+            return {"kind": "hermes-runtime", "safeToStop": True}
+        if re.search(r"(?:^|\s)(?:serve|proxy)(?:\s|$)", low):
+            return {"kind": "hermes-runtime", "safeToStop": True}
+        return {}
+
+    if re.search(r"hermes(?:\.exe)?[\"']?\s+desktop\s+--force-build", cmdline, re.I):
+        return {"kind": "hermes-runtime", "safeToStop": True}
+    if re.search(r"hermes(?:\.exe)?[\"']?\s+proxy\b", cmdline, re.I):
+        return {"kind": "hermes-runtime", "safeToStop": True}
+    if re.search(r"hermes(?:\.exe)?[\"']?\s+serve\b", cmdline, re.I):
+        return {"kind": "hermes-runtime", "safeToStop": True}
+    return {}
+
+
 def main() -> None:
     """Entry point.  Prints one JSON doc to stdout.  Exits 0 for valid scan."""
     try:
@@ -260,7 +290,11 @@ def main() -> None:
             # otherwise swallow the `gateway run` argv).
             "cmdline": _redact_sensitive_cmdline(cmdline)[:120],
         }
-        process.update(_local_preview_metadata(pid, name))
+        runtime_meta = _classify_hermes_runtime_cmdline(cmdline)
+        if runtime_meta:
+            process.update(runtime_meta)
+        else:
+            process.update(_local_preview_metadata(pid, name))
         processes.append(process)
 
     exempted = sum(1 for _pid, _name, cmdline in matches if _is_pausable_gateway(cmdline))

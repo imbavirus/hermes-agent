@@ -17,9 +17,11 @@ import { describe, it } from 'vitest'
 import {
   formatBlockerMessage,
   formatProbeFailedMessage,
+  isHermesRuntimeCmdline,
   parseVenvBlockerScanOutput,
   resolveVenvPython,
   scanVenvBlockers,
+  stopHermesRuntimeBlockers,
   stopSafeVenvBlockers
 } from './venv-blocker-scan'
 
@@ -177,6 +179,46 @@ describe('parseVenvBlockerScanOutput', () => {
 
     assert.equal(o.result.processes[0]?.kind, 'other')
     assert.equal(o.result.processes[0]?.safeToStop, false)
+  })
+
+  it('classifies this-install hermes serve/gateway/proxy/force-build as safe-to-stop runtime', () => {
+    const cmdlines = [
+      String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe desktop --force-build`,
+      String.raw`"C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe" "C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe" proxy start --provider xai --host 127.0.0.1 --port 8645`,
+      String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe -m hermes_cli.main --profile dev serve --host 127.0.0.1 --port 0`,
+      String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe -m hermes_cli.main --profile tester gateway run`
+    ]
+
+    for (const cmdline of cmdlines) {
+      assert.equal(isHermesRuntimeCmdline(cmdline), true, cmdline)
+      const o = parseVenvBlockerScanOutput(
+        ok({
+          blocked: true,
+          processes: [{ pid: 42, name: 'python.exe', cmdline }]
+        })
+      )
+
+      assert.equal(o.kind, 'blocked')
+
+      if (o.kind !== 'blocked') {
+        return
+      }
+
+      assert.equal(o.result.processes[0]?.kind, 'hermes-runtime', cmdline)
+      assert.equal(o.result.processes[0]?.safeToStop, true, cmdline)
+    }
+  })
+
+  it('does not treat unrelated venv python scripts as hermes-runtime', () => {
+    const cmdlines = [
+      String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe C:\Users\imba\hermes-webui\server.py`,
+      String.raw`python.exe important-script.py`,
+      String.raw`C:\Users\imba\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe C:\Users\imba\AppData\Local\hermes\profiles\dev\scripts\coolify-fail-chat.py`
+    ]
+
+    for (const cmdline of cmdlines) {
+      assert.equal(isHermesRuntimeCmdline(cmdline), false, cmdline)
+    }
   })
 
   it('malformed JSON', () => {
@@ -342,5 +384,53 @@ describe('stopSafeVenvBlockers', () => {
       }
     ])
     assert.deepEqual(outcome, { stopped: [47484], failed: [] })
+  })
+})
+
+describe('stopHermesRuntimeBlockers', () => {
+  it('taskkills only hermes-runtime PIDs, not other or local-preview', async () => {
+    const killed: number[] = []
+    const outcome = await stopHermesRuntimeBlockers(
+      {
+        blocked: true,
+        processes: [
+          {
+            pid: 32428,
+            name: 'python.exe',
+            cmdline: 'hermes.exe desktop --force-build',
+            kind: 'hermes-runtime',
+            safeToStop: true
+          },
+          {
+            pid: 37996,
+            name: 'python.exe',
+            cmdline: 'python.exe -m hermes_cli.main --profile dev gateway run',
+            kind: 'hermes-runtime',
+            safeToStop: true
+          },
+          {
+            pid: 99,
+            name: 'python.exe',
+            cmdline: 'python.exe important-script.py',
+            kind: 'other',
+            safeToStop: false
+          },
+          {
+            pid: 47484,
+            name: 'python.exe',
+            cmdline: 'python.exe -m http.server 8766',
+            kind: 'local-preview',
+            safeToStop: true,
+            createTime: 1722798000.25
+          }
+        ]
+      },
+      async (pid) => {
+        killed.push(pid)
+      }
+    )
+
+    assert.deepEqual(killed, [32428, 37996])
+    assert.deepEqual(outcome, { stopped: [32428, 37996], failed: [] })
   })
 })

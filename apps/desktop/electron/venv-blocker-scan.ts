@@ -18,7 +18,7 @@ const execFileAsync = promisify(execFile)
 // Types
 // ---------------------------------------------------------------------------
 
-export type VenvBlockerKind = 'local-preview' | 'other'
+export type VenvBlockerKind = 'local-preview' | 'hermes-runtime' | 'other'
 
 export interface VenvBlockerProcess {
   pid: number
@@ -52,10 +52,40 @@ const SCAN_MODULE = 'hermes_cli._scan_venv_blockers'
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * True when *cmdline* is this install's Hermes CLI runtime (serve / gateway /
+ * proxy / leftover `desktop --force-build`). Those hold `venv\\Scripts\\hermes.exe`
+ * on Windows and abort in-app Update after 15s. Unrelated venv scripts stay false.
+ */
+export function isHermesRuntimeCmdline(cmdline: string): boolean {
+  const c = String(cmdline || '')
+  const lower = c.toLowerCase()
+
+  if (lower.includes('hermes_cli.main')) {
+    if (lower.includes('desktop --force-build')) {
+      return true
+    }
+
+    return /(?:^|\s)(?:serve|gateway|proxy)(?:\s|$)/.test(lower)
+  }
+
+  if (/hermes(?:\.exe)?["']?\s+desktop\s+--force-build/i.test(c)) {
+    return true
+  }
+
+  return /hermes(?:\.exe)?["']?\s+(?:serve|gateway|proxy)\b/i.test(c)
+}
+
 function classifyVenvBlocker(
   process: Pick<VenvBlockerProcess, 'pid' | 'name' | 'cmdline'>,
   hints?: Record<string, unknown>
 ): VenvBlockerProcess {
+  const trustedRuntimeIdentity = hints?.kind === 'hermes-runtime' && hints.safeToStop === true
+
+  if (trustedRuntimeIdentity || isHermesRuntimeCmdline(process.cmdline)) {
+    return { ...process, kind: 'hermes-runtime', safeToStop: true }
+  }
+
   const moduleMatch = process.cmdline.match(/(?:^|\s)-m\s+http\.server(?:\s+(\d{1,5}))?(?:\s|$)/i)
   const isPython = /^python(?:w)?(?:\.exe)?$/i.test(process.name)
   const hintedCreateTime = typeof hints?.createTime === 'number' ? hints.createTime : undefined
@@ -130,6 +160,51 @@ export async function stopSafeVenvBlockers(
         ['-m', 'hermes_cli._scan_venv_blockers', '--terminate-safe', String(process.pid), String(process.createTime)],
         { cwd: updateRoot, windowsHide: true, timeout: 10_000, maxBuffer: 256 * 1024 }
       )
+      stopped.push(process.pid)
+    } catch {
+      failed.push(process.pid)
+    }
+  }
+
+  return { stopped, failed }
+}
+
+async function defaultKillHermesRuntimePid(pid: number): Promise<void> {
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      void 0
+    }
+
+    return
+  }
+
+  await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+    windowsHide: true,
+    timeout: 10_000
+  })
+}
+
+/**
+ * Stop this-install Hermes CLI holders (serve / gateway / proxy / leftover
+ * `--force-build`). Clicking in-app Update is the consent — do not wait for
+ * the local-preview `stopSafeBlockers` flag. Unrelated Python stays untouched.
+ */
+export async function stopHermesRuntimeBlockers(
+  result: VenvBlockerScanResult,
+  killPid: (pid: number) => Promise<void> = defaultKillHermesRuntimePid
+): Promise<{ stopped: number[]; failed: number[] }> {
+  const stopped: number[] = []
+  const failed: number[] = []
+
+  for (const process of result.processes) {
+    if (process.kind !== 'hermes-runtime' || !process.safeToStop) {
+      continue
+    }
+
+    try {
+      await killPid(process.pid)
       stopped.push(process.pid)
     } catch {
       failed.push(process.pid)
