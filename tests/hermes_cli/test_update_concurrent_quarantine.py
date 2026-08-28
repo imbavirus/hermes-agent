@@ -377,6 +377,70 @@ def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
 
 
 @patch.object(cli_main, "_is_windows", return_value=True)
+def test_pause_windows_gateway_access_denied_does_not_abort_update(
+    _winp,
+    monkeypatch,
+    capsys,
+):
+    """Unelevated in-app Apply cannot sc.exe stop NSSM services.
+
+    2026-08-28: hermes update --gateway died with
+    ``[SC] OpenService FAILED 5: Access is denied.`` on Hermes_Gateway_dev.
+    User: NSSM services must not block Apply. Skip that service, continue.
+    A real stop timeout still abort+rollback (sibling test).
+    """
+    import hermes_cli.gateway as gateway_mod
+    import hermes_cli.update_cmd as update_cmd
+
+    service = SimpleNamespace(
+        name="Hermes_Gateway_dev",
+        profile="dev",
+        service_pid=11,
+        service_create_time=11.0,
+        gateway_pid=101,
+        gateway_create_time=101.0,
+        descendant_identities=(),
+    )
+    monkeypatch.setattr(gateway_mod, "find_gateway_pids", lambda **_k: [])
+    monkeypatch.setattr(
+        gateway_mod, "find_profile_gateway_processes", lambda **_k: []
+    )
+    monkeypatch.setattr(
+        gateway_mod, "find_windows_gateway_services", lambda **_k: [service]
+    )
+    monkeypatch.setattr(gateway_mod, "_get_restart_drain_timeout", lambda: 0.1)
+
+    def fake_stop(name, **_kwargs):
+        raise RuntimeError(
+            "[SC] OpenService FAILED 5:\nAccess is denied."
+        )
+
+    restored = []
+    monkeypatch.setattr(update_cmd, "_stop_windows_gateway_service", fake_stop)
+    monkeypatch.setattr(
+        update_cmd,
+        "_restore_windows_gateway_service",
+        lambda name: restored.append(name),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_wait_for_windows_update_gateway_exit",
+        lambda pids, *, timeout: set(),
+    )
+
+    token = cli_main._pause_windows_gateways_for_update()
+
+    assert token["resume_needed"] is True
+    assert token.get("services", []) == []
+    assert token.get("skipped_services") == ["Hermes_Gateway_dev"]
+    assert restored == []
+    out = capsys.readouterr().out
+    assert "Access is denied" in out
+    assert "Update continues" in out
+
+
+@patch.object(cli_main, "_is_windows", return_value=True)
 def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
     _winp,
     monkeypatch,

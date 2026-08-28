@@ -5726,6 +5726,17 @@ def _stop_windows_gateway_service(
     )
 
 
+def _is_scm_access_denied(exc: BaseException) -> bool:
+    """True when sc.exe/SCM refused the handle (unelevated Desktop Apply).
+
+    ``[SC] OpenService FAILED 5: Access is denied.`` must not abort
+    ``hermes update`` — NSSM gateways are services, not user apps. A stop
+    timeout or identity mismatch still fail-closes.
+    """
+    blob = str(exc).lower()
+    return "access is denied" in blob or "openservice failed 5" in blob
+
+
 def _start_windows_gateway_service(name: str, *, timeout: float = 30.0) -> None:
     """Start one previously paused Windows service and verify it is running."""
     import psutil  # noqa: PLC0415
@@ -6004,24 +6015,36 @@ def _pause_windows_gateways_for_update() -> dict | None:
     # restores both the attempted services and the already-paused ordinary
     # gateways before aborting the update.
     paused_services = []
+    skipped_services = []
     current_service_name = None
     try:
         for service in service_gateways:
             current_service_name = str(service.name)
-            _stop_windows_gateway_service(
-                current_service_name,
-                expected_processes=tuple(
-                    getattr(service, "descendant_identities", ())
-                ),
-                expected_service_identity=(
-                    int(service.service_pid),
-                    float(service.service_create_time),
-                ),
-                expected_gateway_identity=(
-                    int(service.gateway_pid),
-                    float(service.gateway_create_time),
-                ),
-            )
+            try:
+                _stop_windows_gateway_service(
+                    current_service_name,
+                    expected_processes=tuple(
+                        getattr(service, "descendant_identities", ())
+                    ),
+                    expected_service_identity=(
+                        int(service.service_pid),
+                        float(service.service_create_time),
+                    ),
+                    expected_gateway_identity=(
+                        int(service.gateway_pid),
+                        float(service.gateway_create_time),
+                    ),
+                )
+            except Exception as stop_exc:
+                if _is_scm_access_denied(stop_exc):
+                    print(
+                        f"  → Skipping Windows gateway service {current_service_name}: "
+                        "Access is denied (unelevated). Update continues."
+                    )
+                    skipped_services.append(current_service_name)
+                    current_service_name = None
+                    continue
+                raise
             paused_services.append(current_service_name)
             current_service_name = None
         if paused_services:
@@ -6037,6 +6060,8 @@ def _pause_windows_gateways_for_update() -> dict | None:
                 "  ✓ Paused Windows gateway service(s): "
                 + ", ".join(paused_services)
             )
+        if skipped_services:
+            token["skipped_services"] = skipped_services
         return token
     except Exception as exc:
         restore_names = []
