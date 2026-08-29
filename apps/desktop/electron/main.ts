@@ -2946,9 +2946,7 @@ async function checkUpdates() {
   // flagging that as an update nudges the user into wiping their work.
   const tipsEqual = Boolean(currentSha && currentSha === targetSha)
 
-  const sshBehind = tipsEqual
-    ? 0
-    : await fetchCompareBehindCount({ currentSha, originUrl: checkUrl, targetSha })
+  const sshBehind = tipsEqual ? 0 : await fetchCompareBehindCount({ currentSha, originUrl: checkUrl, targetSha })
 
   const upToDate = tipsEqual || sshBehind === 0
 
@@ -3300,6 +3298,7 @@ async function stopOwnedBackend(identity) {
 function pidExists(pid: number): boolean {
   try {
     process.kill(pid, 0)
+
     return true
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM'
@@ -12023,6 +12022,7 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   // the claim, and would miss anything printed before it.
   const outputTail = createBackendOutputTail()
   outputTail.attach(child)
+
   // Watch stdout + ready file from spawn, not after claim. The Windows
   // start-marker probe can outlast a warm serve's READY line; a late waiter
   // would time out against a healthy backend.
@@ -12031,6 +12031,7 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
     initialText: outputTail.text(),
     readyFile
   })
+
   await claimBackendChild(child, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce, outputTail)
 
   child.stdout.on('data', rememberLog)
@@ -12415,6 +12416,7 @@ async function startHermes() {
     // later, after the claim, and would miss anything printed before it.
     const primaryOutputTail = createBackendOutputTail()
     primaryOutputTail.attach(hermesProcess)
+
     // Watch stdout + ready file from spawn, not after claim. The Windows
     // start-marker probe can outlast a warm serve's READY line; a late waiter
     // would time out against a healthy backend.
@@ -12423,6 +12425,7 @@ async function startHermes() {
       initialText: primaryOutputTail.text(),
       readyFile
     })
+
     await claimBackendChild(
       hermesProcess,
       `${backend.command} ${backend.args.join(' ')}`,

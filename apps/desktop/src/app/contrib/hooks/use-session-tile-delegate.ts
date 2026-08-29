@@ -13,7 +13,7 @@ import {
   readOnlyRuntimeIdFor,
   resumeWithStoredTranscriptFallback
 } from '@/store/read-only-transcript'
-import { knownSessionOwner, ownerLookupSessionRows, getSessionOwnerHint } from '@/store/session'
+import { getSessionOwnerHint, knownSessionOwner, ownerLookupSessionRows } from '@/store/session'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
 import { publishSessionState, sessionTileOwnerRoute, setSessionTileDelegate } from '@/store/session-states'

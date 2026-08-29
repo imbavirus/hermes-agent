@@ -193,6 +193,7 @@ describe('parseVenvBlockerScanOutput', () => {
 
     for (const cmdline of cmdlines) {
       assert.equal(isHermesRuntimeCmdline(cmdline), true, cmdline)
+
       const o = parseVenvBlockerScanOutput(
         ok({
           blocked: true,
@@ -248,7 +249,10 @@ describe('parseVenvBlockerScanOutput', () => {
 
   it('does not treat user npm or Windows Terminal as pack-debris', () => {
     assert.equal(isPackDebrisCmdline('npm install', String.raw`C:\Users\imba\git\infernos`), false)
-    assert.equal(isPackDebrisCmdline(String.raw`C:\Program Files\WindowsApps\...\WindowsTerminal.exe -Embedding`), false)
+    assert.equal(
+      isPackDebrisCmdline(String.raw`C:\Program Files\WindowsApps\...\WindowsTerminal.exe -Embedding`),
+      false
+    )
     assert.equal(isPackDebrisCmdline(String.raw`C:\Windows\System32\nssm.exe`), false)
   })
 
@@ -439,6 +443,7 @@ describe('stopSafeVenvBlockers', () => {
 describe('stopHermesRuntimeBlockers', () => {
   it('taskkills only hermes-runtime PIDs, not other or local-preview', async () => {
     const killed: number[] = []
+
     const outcome = await stopHermesRuntimeBlockers(
       {
         blocked: true,
@@ -474,7 +479,7 @@ describe('stopHermesRuntimeBlockers', () => {
           }
         ]
       },
-      async (pid) => {
+      async pid => {
         killed.push(pid)
       }
     )
@@ -485,6 +490,7 @@ describe('stopHermesRuntimeBlockers', () => {
 
   it('taskkills leftover pack-debris npm/cmd, not Windows Terminal', async () => {
     const killed: number[] = []
+
     const outcome = await stopHermesRuntimeBlockers(
       {
         blocked: true,
@@ -505,7 +511,7 @@ describe('stopHermesRuntimeBlockers', () => {
           }
         ]
       },
-      async (pid) => {
+      async pid => {
         killed.push(pid)
       }
     )
