@@ -544,6 +544,30 @@ test('Heard @ack still forwards a real body @tag', () => {
   assert.equal(owed.some(m => m.name === 'builder'), true, 'body @builder must still owe builder')
 })
 
+test('Heard @a / @b chrome does not mint mention debt (ComfyUI slash list)', () => {
+  const gc = load(() => '(pass)')
+  const seated = [
+    { name: 'dev', title: '' },
+    { name: 'tester', title: '' },
+    { name: 'reviewer', title: '' },
+  ]
+  const log = [
+    { from: { kind: 'user', name: 'You' }, text: 'hold the jar', at: 1 },
+    {
+      from: { kind: 'member', name: 'dev' },
+      text: 'Heard @reviewer / @tester — holding. No POST on **132812**.',
+      at: 2,
+    },
+  ]
+  const owed = gc.membersOwedMentionTurn(log, seated)
+
+  assert.equal(
+    owed.length,
+    0,
+    `slash-list Heard @ chrome owed ${owed.map(m => m.name).join(',')}`,
+  )
+})
+
 test('mention parse: email@dev.com is not a @dev tag', () => {
   const gc = load(() => '(pass)')
   const seated = [...MEMBERS, { name: 'dev', title: '' }]

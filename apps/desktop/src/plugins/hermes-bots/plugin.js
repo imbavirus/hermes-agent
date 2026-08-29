@@ -7326,10 +7326,13 @@ function entryIsFromMember(entry, member) {
   return !member.remoteSource
 }
 
-/** Drop the required live-ack prefix `Heard @name —` so spoken chrome cannot
- *  mint pull-in debt. A body @tag after the dash still counts. */
+/** Drop required live-ack chrome `Heard @name —` / `Heard @a / @b —` so spoken
+ *  prefixes cannot mint pull-in debt. A body @tag after the dash still counts. */
 function groupMentionDebtText(text) {
-  return String(text || '').replace(/^\s*Heard @[a-z0-9][a-z0-9._-]*\b[ \t]*[—–\-:]*[ \t]*/i, '')
+  return String(text || '').replace(
+    /^\s*Heard(?:[ \t]+@[a-z0-9][a-z0-9._-]*\b|[ \t]*[/|,;&]+[ \t]*@[a-z0-9][a-z0-9._-]*\b)+[ \t]*[—–\-:]*[ \t]*/i,
+    '',
+  )
 }
 
 /** Members explicitly @-mentioned since the last user message who have not
