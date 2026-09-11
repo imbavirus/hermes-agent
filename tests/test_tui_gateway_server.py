@@ -4625,7 +4625,7 @@ def test_session_close_settles_active_turn_before_teardown(monkeypatch):
     assert response["result"] == {"closed": True}
 
 
-def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
+def test_ws_orphan_reap_lets_isolated_running_turn_finish_then_reaps(monkeypatch):
     callbacks = []
     interrupted = []
     torn_down = []
@@ -4649,7 +4649,7 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
         running=True,
         _compute_host_active=True,
         history=[{"role": "assistant", "content": "partial"}],
-        queued_prompt={"text": "must not run"},
+        queued_prompt={"text": "must keep running"},
     )
     server._sessions["isolated-sid"] = session
     monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.01)
@@ -4670,20 +4670,17 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
         server._schedule_ws_orphan_reap("isolated-sid")
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
-        assert session["_turn_cancel_requested"] is True
-        assert session["queued_prompt"] is None
+        assert interrupted == []
+        assert session.get("_turn_cancel_requested") is not True
+        assert session["queued_prompt"] == {"text": "must keep running"}
         assert session["history"] == [{"role": "assistant", "content": "partial"}]
-        assert len(callbacks) == 1
-
-        callbacks.pop(0)()
-
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
+        assert "isolated-sid" in server._sessions
         assert len(callbacks) == 1
 
         session["running"] = False
         callbacks.pop(0)()
 
+        assert interrupted == []
         assert "isolated-sid" not in server._sessions
         assert torn_down == [(session, "ws_orphan_reap")]
     finally:
@@ -4820,16 +4817,18 @@ def test_ws_orphan_reap_defers_running_turn_for_active_delegation(monkeypatch):
 
         callbacks.pop(0)()
 
-        assert interrupted == ["interrupted"]
+        assert interrupted == []
+        assert session["running"] is True
         assert len(callbacks) == 1
 
+        session["running"] = False
         callbacks.pop(0)()
         assert "delegating-turn" not in server._sessions
     finally:
         server._sessions.pop("delegating-turn", None)
 
 
-def test_ws_orphan_reap_interrupts_in_process_turn(monkeypatch):
+def test_ws_orphan_reap_does_not_interrupt_in_process_turn(monkeypatch):
     callbacks = []
     interrupted = []
 
@@ -4863,8 +4862,10 @@ def test_ws_orphan_reap_interrupts_in_process_turn(monkeypatch):
         server._schedule_ws_orphan_reap("inline-sid")
         callbacks.pop(0)()
 
-        assert interrupted == ["interrupted"]
-        assert session["_turn_cancel_requested"] is True
+        assert interrupted == []
+        assert session.get("_turn_cancel_requested") is not True
+        assert session["running"] is True
+        assert "inline-sid" in server._sessions
         assert len(callbacks) == 1
     finally:
         server._sessions.pop("inline-sid", None)

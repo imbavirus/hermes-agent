@@ -71,21 +71,35 @@ export const $sessionStates = atom<Record<string, ClientSessionState>>({})
 // connected gateways can both expose a 'default' profile, so the gateway
 // keep-set (pruneSecondaryGateways) must key live work by the composite
 // (connectionId, profile) scope, not the bare profile name. Recorded at
-// event fan-in (use-gateway-boot); local/primary events carry no connectionId
-// and record nothing, so single-source behavior is untouched.
+// event fan-in (use-gateway-boot). Registry events carry connectionId and
+// store the composite key. Untagged local/primary events (profile rail:
+// kytyps5, mia) store the bare profile so wipe ($sessions emptied) cannot
+// drop them from pruneSecondaryGateways keep.has(entry.profile).
 // ---------------------------------------------------------------------------
 
 const sessionScopeByRuntimeId = new Map<string, string>()
 
 export function recordSessionEventScope(event: { connectionId?: string; profile?: string; session_id?: string }): void {
-  if (event.session_id && event.connectionId) {
+  if (!event.session_id) {
+    return
+  }
+
+  if (event.connectionId) {
     sessionScopeByRuntimeId.set(event.session_id, registryBackendScopeKey(event.connectionId, event.profile))
+    return
+  }
+
+  const profile = event.profile?.trim()
+
+  if (profile) {
+    sessionScopeByRuntimeId.set(event.session_id, normalizeProfileKey(profile))
   }
 }
 
-/** Composite scopes of registry-sourced sessions that are live (busy or
- * waiting on input) — the (connectionId, profile) half of the gateway
- * keep-set. Local-source live work keeps flowing through profile names.
+/** Composite or bare-profile scopes of sessions that are live (busy,
+ * waiting on input, or awaiting the first token) — the keep-set half of
+ * pruneSecondaryGateways. Registry-sourced work uses `conn:<id>::<profile>`;
+ * untagged local-profile work uses the bare profile name.
  *
  * `extraRuntimeIds` covers work that is NOT `busy` (a finished turn that
  * still has `terminal(background=true)` children): without it the keep-set
@@ -95,7 +109,7 @@ export function liveSessionScopes(extraRuntimeIds?: Iterable<string>): Set<strin
   const extra = extraRuntimeIds ? new Set(extraRuntimeIds) : null
 
   for (const [runtimeId, state] of Object.entries($sessionStates.get())) {
-    if (!state || (!state.busy && !state.needsInput && !extra?.has(runtimeId))) {
+    if (!state || (!state.busy && !state.needsInput && !state.awaitingResponse && !extra?.has(runtimeId))) {
       continue
     }
 

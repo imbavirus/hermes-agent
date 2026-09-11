@@ -44,7 +44,16 @@ const {
   setPrimaryGateway
 } = await import('./gateway')
 
-const { $sessionTiles, foregroundSessionScopes, liveSessionScopes } = await import('./session-states')
+const {
+  $sessionStates,
+  $sessionTiles,
+  clearAllSessionStates,
+  foregroundSessionScopes,
+  liveSessionScopes,
+  publishSessionState,
+  recordSessionEventScope
+} = await import('./session-states')
+const { createClientSessionState } = await import('@/lib/chat-runtime')
 
 function installDesktop(): void {
   ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
@@ -87,11 +96,13 @@ beforeEach(() => {
   setPrimaryGateway({ connectionState: 'open' } as never, 'default')
   gatewayMocks.closed = []
   $sessionTiles.set([])
+  clearAllSessionStates()
 })
 
 afterEach(() => {
   closeSecondaryGateways()
   $sessionTiles.set([])
+  clearAllSessionStates()
   vi.clearAllMocks()
   delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
 })
@@ -173,5 +184,30 @@ describe('foreground tile retention vs. the live-work pruner (#93892)', () => {
     pruneSecondaryGateways(idleKeepSet())
 
     expect(gatewayMocks.closed).toEqual(['wss://homelab.invalid/api/ws?profile=bot'])
+  })
+})
+
+describe('untagged local-profile live work vs. the live-work pruner', () => {
+  it('keeps a busy kytyps5 socket after leaving that profile (no connectionId)', async () => {
+    // Profile-rail switch uses the legacy door: createSecondary(profile) with
+    // connectionId null. Events are untagged. Before the fix liveSessionScopes
+    // returned ∅, prune closed the socket, gateway ws_orphan_reap'd the turn.
+    await openGatewayForAgent(null, 'kytyps5')
+    recordSessionEventScope({ profile: 'kytyps5', session_id: 'rt-kytyps5' })
+    publishSessionState('rt-kytyps5', { ...createClientSessionState('stored-kytyps5'), busy: true })
+
+    pruneSecondaryGateways(liveSessionScopes())
+    pruneSecondaryGateways(liveSessionScopes())
+
+    expect(gatewayMocks.closed).toEqual([])
+    expect($sessionStates.get()['rt-kytyps5']?.busy).toBe(true)
+  })
+
+  it('still prunes an idle untagged local profile with no live work', async () => {
+    await openGatewayForAgent(null, 'kytyps5')
+
+    pruneSecondaryGateways(liveSessionScopes())
+
+    expect(gatewayMocks.closed.length).toBeGreaterThan(0)
   })
 })

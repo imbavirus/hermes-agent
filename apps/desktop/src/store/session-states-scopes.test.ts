@@ -18,8 +18,9 @@ import {
  * The (connectionId, profile) half of the gateway keep-set. Working/attention
  * ids are profile-blind, and every registered source exposes a 'default'
  * profile — so registry-sourced live work must surface as composite
- * backendScopeKey scopes, while untagged local/primary events contribute
- * nothing (their liveness keeps flowing through bare profile names).
+ * backendScopeKey scopes. Untagged local/primary events (no connectionId)
+ * record the bare profile so a busy kytyps5/mia socket survives wipe
+ * ($sessions emptied) and pruneSecondaryGateways keep.has(entry.profile).
  */
 
 const state = (patch: Partial<ReturnType<typeof createClientSessionState>> = {}) => ({
@@ -58,11 +59,26 @@ describe('liveSessionScopes', () => {
     expect(liveSessionScopes()).toEqual(new Set())
   })
 
-  it('ignores untagged (local/primary) events — no connectionId, no scope', () => {
-    recordSessionEventScope({ profile: 'default', session_id: 'rt-1' })
+  it('pins an untagged local profile so wipe cannot prune its socket', () => {
+    recordSessionEventScope({ profile: 'kytyps5', session_id: 'rt-1' })
     publishSessionState('rt-1', state({ busy: true }))
 
+    expect(liveSessionScopes()).toEqual(new Set(['kytyps5']))
+  })
+
+  it('pins awaitingResponse on an untagged local profile (submit → first token)', () => {
+    recordSessionEventScope({ profile: 'mia', session_id: 'rt-wait' })
+    publishSessionState('rt-wait', state({ awaitingResponse: true, busy: false }))
+
+    expect(liveSessionScopes()).toEqual(new Set(['mia']))
+  })
+
+  it('keeps an untagged extra runtime after the LLM turn settled', () => {
+    recordSessionEventScope({ profile: 'kytyps5', session_id: 'rt-bg' })
+    publishSessionState('rt-bg', state({ busy: false, needsInput: false }))
+
     expect(liveSessionScopes()).toEqual(new Set())
+    expect(liveSessionScopes(['rt-bg'])).toEqual(new Set(['kytyps5']))
   })
 
   it("keeps two sources' same-named 'default' profiles distinct", () => {
@@ -171,5 +187,15 @@ describe('clearIdleSessionStates', () => {
     expect($workingSessionIds.get()).toContain('stored-busy')
     expect($workingSessionIds.get()).not.toContain('stored-idle')
     expect(liveSessionScopes(['rt-bg'])).toEqual(new Set(['conn:homelab::default']))
+  })
+
+  it('keeps an untagged local busy runtime and its bare profile after wipe', () => {
+    recordSessionEventScope({ profile: 'kytyps5', session_id: 'rt-local' })
+    publishSessionState('rt-local', state({ busy: true, storedSessionId: 'stored-kytyps5' }))
+
+    clearIdleSessionStates()
+
+    expect($sessionStates.get()['rt-local']?.busy).toBe(true)
+    expect(liveSessionScopes()).toEqual(new Set(['kytyps5']))
   })
 })

@@ -104,6 +104,17 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     expect(liveSessionScopes()).toEqual(new Set(['conn:homelab::dev']))
   })
 
+  it('keeps untagged local-profile work after wipe (kytyps5 / mia rail)', () => {
+    recordSessionEventScope({ profile: 'kytyps5', session_id: 'rt-kytyps5' })
+    publishSessionState('rt-kytyps5', { ...createClientSessionState('stored-kytyps5'), busy: true })
+
+    wipeSessionListsForGatewaySwitch()
+
+    expect($sessions.get()).toEqual([])
+    expect($workingSessionIds.get()).toContain('stored-kytyps5')
+    expect(liveSessionScopes()).toEqual(new Set(['kytyps5']))
+  })
+
   it('keeps a finished turn that still has a background process', () => {
     recordSessionEventScope({ connectionId: 'homelab', profile: 'dev', session_id: 'rt-bg' })
     publishSessionState('rt-bg', { ...createClientSessionState('stored-bg'), busy: false })

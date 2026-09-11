@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 //    match only their composite backendScopeKey scope.
 //  - the session-states scope ledger (recordSessionEventScope /
 //    liveSessionScopes) turns registry-tagged live work into those composite
-//    keep-set entries, and ignores untagged local/primary events.
+//    keep-set entries. Untagged local/primary events record the bare profile
+//    so a busy local-profile socket (kytyps5) survives wipe + prune.
 
 const gatewayMocks = vi.hoisted(() => ({
   closed: [] as string[],
