@@ -83,3 +83,28 @@ export function decideLivenessForceClose(input: LivenessForceCloseInput): Livene
     ? { close: true, reason: 'failure-streak-exhausted' }
     : { close: true, reason: 'no-in-flight-work' }
 }
+
+/** How close together two focus/visibility nudges may fire. */
+export const FOCUS_RECONNECT_DEBOUNCE_MS = 15_000
+
+export interface FocusReconnectNudgeInput {
+  /** Milliseconds since the last focus/visibility reconnect nudge. */
+  msSinceLastNudge: number
+  /** How many sessions currently report working (mid-turn). */
+  workingSessionCount: number
+}
+
+/** Whether a window `focus` / `visibilitychange` should call `reconnectNow()`.
+ *  Old behavior nudged on every focus — that ping-kills a busy Windows
+ *  backend and remounts the session the user is looking at. */
+export function shouldNudgeReconnectOnFocus(input: FocusReconnectNudgeInput): boolean {
+  const workingSessionCount = Math.max(0, Math.floor(input.workingSessionCount) || 0)
+
+  if (workingSessionCount > 0) {
+    return false
+  }
+
+  const msSinceLastNudge = Number.isFinite(input.msSinceLastNudge) ? input.msSinceLastNudge : Number.POSITIVE_INFINITY
+
+  return msSinceLastNudge >= FOCUS_RECONNECT_DEBOUNCE_MS
+}

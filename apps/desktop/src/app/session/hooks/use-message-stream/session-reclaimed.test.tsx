@@ -116,6 +116,20 @@ describe('session.reclaimed', () => {
     expect(tiles.find(t => t.storedSessionId === 'stored-2')?.runtimeId).toBe('live-kept')
   })
 
+  it('parks the tile transcript before dropping state so the pane does not flash the loader', () => {
+    mountStream()
+    const messages = [{ id: 'm1', parts: [{ text: 'keep me', type: 'text' as const }], role: 'user' as const }]
+    publishSessionState('live-gone', createClientSessionState('stored-1', messages))
+    $sessionTiles.set([{ runtimeId: 'live-gone', storedSessionId: 'stored-1' }])
+
+    reclaim('live-gone')
+
+    const tile = $sessionTiles.get().find(t => t.storedSessionId === 'stored-1')
+    expect(tile?.runtimeId).toBeUndefined()
+    expect(tile?.parkedMessages).toEqual(messages)
+    expect($sessionStates.get()['live-gone']).toBeUndefined()
+  })
+
   // The wiring cache is resumeTile's warm path: a leftover entry for the dead
   // runtime would be handed straight back on the re-resume, rebinding the tile
   // to the same reclaimed id the backend just forgot.

@@ -17,7 +17,9 @@ import {
   setSessions,
   setSessionsLoading
 } from '@/store/session'
-import { $stalledSessionIds } from '@/store/session-states'
+import { $sessionStates, $stalledSessionIds, $workingSessionIds, clearAllSessionStates, liveSessionScopes, publishSessionState, recordSessionEventScope } from '@/store/session-states'
+import { $backgroundStatusBySession } from '@/store/composer-status'
+import { createClientSessionState } from '@/lib/chat-runtime'
 
 import {
   $gatewaySwitching,
@@ -46,6 +48,8 @@ const { invalidateProfileListFetches } = await import('@/store/profile')
 describe('wipeSessionListsForGatewaySwitch', () => {
   beforeEach(() => {
     $gatewaySwitching.set(false)
+    clearAllSessionStates()
+    $backgroundStatusBySession.set({})
     setSessions([{ id: 's1', title: 'old', profile: 'default' } as never])
     setSessionProfilesTruncated({ default: true })
     setCronSessions([{ id: 'c1', title: 'cron', profile: 'default' } as never])
@@ -64,6 +68,8 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     $stalledSessionIds.set([])
     setSessionsLoading(true)
     $gatewaySwitching.set(false)
+    clearAllSessionStates()
+    $backgroundStatusBySession.set({})
   })
 
   it('clears lists and arms loading so sidebar skeletons retrigger', () => {
@@ -86,6 +92,31 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     wipeSessionListsForGatewaySwitch()
 
     expect(invalidateProfileListFetches).toHaveBeenCalled()
+  })
+
+  it('keeps in-flight work so the previous profile socket is not pruned', () => {
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'dev', session_id: 'rt-busy' })
+    publishSessionState('rt-busy', { ...createClientSessionState('stored-busy'), busy: true })
+
+    wipeSessionListsForGatewaySwitch()
+
+    expect($workingSessionIds.get()).toContain('stored-busy')
+    expect(liveSessionScopes()).toEqual(new Set(['conn:homelab::dev']))
+  })
+
+  it('keeps a finished turn that still has a background process', () => {
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'dev', session_id: 'rt-bg' })
+    publishSessionState('rt-bg', { ...createClientSessionState('stored-bg'), busy: false })
+    $backgroundStatusBySession.set({
+      'rt-bg': [{ id: 'p1', state: 'running', title: 'build', type: 'background' }]
+    })
+
+    wipeSessionListsForGatewaySwitch()
+
+    expect($sessionStates.get()['rt-bg']?.storedSessionId).toBe('stored-bg')
+    expect(liveSessionScopes(['rt-bg'])).toEqual(new Set(['conn:homelab::dev']))
+
+    $backgroundStatusBySession.set({})
   })
 })
 

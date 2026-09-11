@@ -57,4 +57,18 @@ describe('active work bridge', () => {
 
     expect(setActiveWork).not.toHaveBeenCalled()
   })
+
+  it('counts a background process as active work after the turn settles', async () => {
+    const { $backgroundStatusBySession } = await import('./composer-status')
+
+    $sessions.set([session('s1', 'Fix login')])
+    publishSessionState('runtime-1', busy('s1', false))
+    $backgroundStatusBySession.set({
+      'runtime-1': [{ id: 'p1', state: 'running', title: 'npm test', type: 'background' }]
+    })
+
+    expect(setActiveWork).toHaveBeenLastCalledWith({ count: 1, titles: ['Fix login'] })
+
+    $backgroundStatusBySession.set({})
+  })
 })

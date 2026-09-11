@@ -6,6 +6,7 @@ import { getLatestSessionMessages, type ProfileScope } from '@/hermes'
 import { preserveLocalAssistantErrors, sealOpenToolParts, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
+import { refreshBackgroundProcesses, runningBackgroundRuntimeIds } from '@/store/composer-status'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery, batteryPollInterval } from '@/store/power'
 import { refreshActiveProfile } from '@/store/profile'
@@ -863,4 +864,26 @@ export function useBackgroundSync({
       void refreshHermesConfig()
     }
   }, [activeSessionId, freshDraftReady, gatewayState, refreshCurrentModel, refreshHermesConfig])
+
+  // Composer status-stack only polls while its session is on screen. Tabbing
+  // away unmounts that stack, so silent `terminal(background=true)` exits would
+  // never be noticed and the keep-set would pin a dead job. This poller is
+  // NOT visibility-gated — jobs keep running off-focus and we still observe
+  // them until they finish.
+  useEffect(() => {
+    if (gatewayState !== 'open') {
+      return
+    }
+
+    const tick = () => {
+      for (const runtimeId of runningBackgroundRuntimeIds()) {
+        void refreshBackgroundProcesses(runtimeId)
+      }
+    }
+
+    tick()
+    const id = window.setInterval(tick, 5_000)
+
+    return () => window.clearInterval(id)
+  }, [gatewayState])
 }

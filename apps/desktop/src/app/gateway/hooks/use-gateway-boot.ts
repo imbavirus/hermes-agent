@@ -6,7 +6,7 @@ import type { HermesConnection } from '@/global'
 import { HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { desktopDefaultCwd } from '@/lib/desktop-fs'
-import { decideLivenessForceClose, LIVENESS_REPROBE_DELAY_MS } from '@/lib/gateway-liveness-policy'
+import { decideLivenessForceClose, LIVENESS_REPROBE_DELAY_MS, shouldNudgeReconnectOnFocus } from '@/lib/gateway-liveness-policy'
 import { reconnectBackoffDelayMs } from '@/lib/reconnect-backoff'
 import { BACKEND_BOOT_WAIT_TIMEOUT_MS, RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import {
@@ -17,7 +17,7 @@ import {
   resumeDesktopBootForRetry,
   setDesktopBootStep
 } from '@/store/boot'
-import { resetBackgroundPollingGuard } from '@/store/composer-status'
+import { resetBackgroundPollingGuard, runningBackgroundRuntimeIds } from '@/store/composer-status'
 import {
   $gateway,
   activeGatewayConnectionId,
@@ -64,11 +64,10 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import {
-  $attentionSessionIds,
   $sessionOwnerHoldRevision,
   $sessionTiles,
-  $workingSessionIds,
   foregroundSessionScopes,
   liveSessionScopes,
   openTileGatewayScopes,
@@ -223,6 +222,7 @@ export function useGatewayBoot({
     // socket while turns are in flight. Reset on any successful probe or a
     // clean socket open.
     let livenessProbeFailures = 0
+    let lastFocusNudgeAt = Number.NEGATIVE_INFINITY
     // Bounded re-probe scheduled instead of an immediate teardown when a
     // probe times out mid-turn (see gateway-liveness-policy.ts).
     let livenessReprobeTimer: ReturnType<typeof setTimeout> | null = null
@@ -496,7 +496,7 @@ export function useGatewayBoot({
         livenessProbeFailures += 1
 
         const decision = decideLivenessForceClose({
-          workingSessionCount: $workingSessionIds.get().length,
+          workingSessionCount: $liveWorkSessionIds.get().length,
           consecutiveFailures: livenessProbeFailures
         })
 
@@ -879,12 +879,40 @@ export function useGatewayBoot({
     const onOnline = () => void forceReconnectNow()
 
     const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void reconnectNow()
+      if (document.visibilityState !== 'visible') {
+        return
       }
+
+      const now = Date.now()
+
+      if (
+        !shouldNudgeReconnectOnFocus({
+          msSinceLastNudge: now - lastFocusNudgeAt,
+          workingSessionCount: $liveWorkSessionIds.get().length
+        })
+      ) {
+        return
+      }
+
+      lastFocusNudgeAt = now
+      void reconnectNow()
     }
 
-    const onFocus = () => void reconnectNow()
+    const onFocus = () => {
+      const now = Date.now()
+
+      if (
+        !shouldNudgeReconnectOnFocus({
+          msSinceLastNudge: now - lastFocusNudgeAt,
+          workingSessionCount: $liveWorkSessionIds.get().length
+        })
+      ) {
+        return
+      }
+
+      lastFocusNudgeAt = now
+      void reconnectNow()
+    }
 
     window.addEventListener('online', onOnline)
     document.addEventListener('visibilitychange', onVisible)
@@ -908,12 +936,12 @@ export function useGatewayBoot({
     // Do not key this off `entry.retained` — that flag only skips dispose-after-
     // RPC; idle prune is what reclaims hover-warmed sockets after you leave.
     const recomputeKeptGateways = () => {
-      const live = new Set([...$workingSessionIds.get(), ...$attentionSessionIds.get()])
+      const live = new Set($liveWorkSessionIds.get())
       // Registry-scoped (connectionId, profile) scopes with live work. Two
       // sources can expose the same profile name (every source has a
       // 'default'), so bare profile names can't represent a non-local
       // source's liveness without keeping the wrong gateway alive.
-      const keep = new Set([...liveSessionScopes(), ...foregroundSessionScopes()])
+      const keep = new Set([...liveSessionScopes(runningBackgroundRuntimeIds()), ...foregroundSessionScopes()])
 
       for (const session of $sessions.get()) {
         if (live.has(session.id)) {
@@ -933,8 +961,7 @@ export function useGatewayBoot({
       pruneSecondaryGateways(keep)
     }
 
-    const offWorking = $workingSessionIds.subscribe(() => recomputeKeptGateways())
-    const offAttention = $attentionSessionIds.subscribe(() => recomputeKeptGateways())
+    const offLiveWork = $liveWorkSessionIds.subscribe(() => recomputeKeptGateways())
     const offActiveSession = $activeSessionId.subscribe(() => recomputeKeptGateways())
     const offSessionTiles = $sessionTiles.subscribe(() => recomputeKeptGateways())
     const offActiveProfile = $activeGatewayProfile.subscribe(() => recomputeKeptGateways())
@@ -1141,8 +1168,7 @@ export function useGatewayBoot({
       clearBootRetryTimer()
       clearLivenessReprobeTimer()
       clearInterval(keepaliveTimer)
-      offWorking()
-      offAttention()
+      offLiveWork()
       offActiveSession()
       offSessionTiles()
       offActiveProfile()

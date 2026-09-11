@@ -40,6 +40,7 @@ import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import { sessionAwaitingInput } from '@/store/prompts'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import {
   $gatewayState,
   $selectedStoredSessionId,
@@ -49,6 +50,7 @@ import {
 } from '@/store/session'
 import { requestForSessionProfile } from '@/store/session-request-router'
 import {
+  $focusedStoredSessionId,
   $sessionStates,
   $sessionTileDelegateRevision,
   $sessionTiles,
@@ -75,6 +77,50 @@ import { lastVisibleMessageIsUser } from './thread-loading'
 import { ChatView } from '.'
 
 const NO_MESSAGES: ChatMessage[] = []
+
+/** Whether SessionTilePane's mount/unbind effect should call resumeTile.
+ *  Bot Mode tiles stay bound in the background (inbound room traffic).
+ *  Sessions-mode tiles that still have live work (a running turn or
+ *  background process) stay bound too — unbinding them arms `ws_orphan_reap`
+ *  and kills the job when you tab away. Idle sessions-mode tiles must NOT
+ *  auto-resume: an unfocused persisted idle tile that keeps a live runtime
+ *  gets reaped and auto-resumes forever. */
+export function shouldAutoResumeSessionTile(args: {
+  error?: string
+  focusedStoredSessionId: null | string
+  gatewayOpen: boolean
+  hasLiveWork?: boolean
+  resuming: boolean
+  runtimeId?: string
+  storedSessionId: string
+  workspaceMode?: SessionTile['workspaceMode']
+}): boolean {
+  if (!args.gatewayOpen || args.runtimeId || args.error || args.resuming) {
+    return false
+  }
+
+  if (args.workspaceMode === 'bots' || args.hasLiveWork) {
+    return true
+  }
+
+  return args.focusedStoredSessionId === args.storedSessionId
+}
+
+/** Whether SessionTilePane should paint the centered Hermes loader.
+ *  First hydrate (no runtime, no parked tail) still needs it. After a
+ *  live runtime was bound, `session.reclaimed` / reconnect clears
+ *  runtimeId — swapping the whole ChatView for the loader is the
+ *  "page refresh" flash. Keep the parked transcript instead. */
+export function shouldShowSessionTileSpinner(args: {
+  parkedMessageCount: number
+  runtimeId?: string
+}): boolean {
+  if (args.runtimeId) {
+    return false
+  }
+
+  return args.parkedMessageCount <= 0
+}
 
 export function sessionTileResumeFailure(
   message: string,
@@ -108,7 +154,15 @@ function buildTileView(storedSessionId: string): SessionView {
     runtimeId ? states[runtimeId] : undefined
   )
 
-  const $messages = computed($state, state => state?.messages ?? NO_MESSAGES)
+  const $messages = computed([$state, $sessionTiles], (state, tiles) => {
+    if (state?.messages?.length) {
+      return state.messages
+    }
+
+    const parked = tiles.find(t => t.storedSessionId === storedSessionId)?.parkedMessages
+
+    return parked?.length ? parked : NO_MESSAGES
+  })
 
   return {
     kind: 'tile',
@@ -281,8 +335,16 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
   const runtimeId = tile?.runtimeId ?? null
   const gatewayOpen = useStore($gatewayState) === 'open'
   const delegateRevision = useStore($sessionTileDelegateRevision)
+  const focusedStoredSessionId = useStore($focusedStoredSessionId)
+  const liveWorkIds = useStore($liveWorkSessionIds)
+  const hasLiveWork = liveWorkIds.includes(storedSessionId)
   const resumingRef = useRef(false)
+  const lastRuntimeIdRef = useRef<string | null>(null)
   const view = useMemo(() => buildTileView(storedSessionId), [storedSessionId])
+
+  if (runtimeId) {
+    lastRuntimeIdRef.current = runtimeId
+  }
 
   const storedSessionStillExists = useCallback(
     () => $sessions.get().some(s => sessionMatchesStoredId(s, storedSessionId)),
@@ -342,7 +404,18 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
   // latched every restored tile into the error card.
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
-    if (!gatewayOpen || runtimeId || tile?.error || resumingRef.current) {
+    if (
+      !shouldAutoResumeSessionTile({
+        error: tile?.error,
+        focusedStoredSessionId,
+        gatewayOpen,
+        hasLiveWork,
+        resuming: resumingRef.current,
+        runtimeId: runtimeId ?? undefined,
+        storedSessionId,
+        workspaceMode: tile?.workspaceMode
+      })
+    ) {
       return
     }
 
@@ -382,7 +455,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       .finally(() => {
         resumingRef.current = false
       })
-  }, [delegateRevision, gatewayOpen, ownerRoute, runtimeId, storedSessionId, tile?.error])
+  }, [delegateRevision, focusedStoredSessionId, gatewayOpen, hasLiveWork, ownerRoute, runtimeId, storedSessionId, tile?.error, tile?.workspaceMode])
 
   // The gateway (re)opening invalidates any latched error — it likely came
   // from a not-yet-open gateway or the previous connection. Clearing it
@@ -409,9 +482,15 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
     )
   }
 
-  if (!runtimeId) {
-    // The SAME session loader the primary thread shows (Thread's
-    // loading === 'session' branch) — one loading language everywhere.
+  const displayRuntimeId = runtimeId ?? lastRuntimeIdRef.current
+
+  if (
+    shouldShowSessionTileSpinner({
+      parkedMessageCount: tile?.parkedMessages?.length ?? 0,
+      runtimeId: displayRuntimeId ?? undefined
+    }) ||
+    !displayRuntimeId
+  ) {
     return (
       <div className="relative h-full">
         <CenteredThreadSpinner />
@@ -419,7 +498,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
     )
   }
 
-  return <TileChat runtimeId={runtimeId} storedSessionId={storedSessionId} view={view} />
+  return <TileChat runtimeId={displayRuntimeId} storedSessionId={storedSessionId} view={view} />
 }
 
 // ---------------------------------------------------------------------------

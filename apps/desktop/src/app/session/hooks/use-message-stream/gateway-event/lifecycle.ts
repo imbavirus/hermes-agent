@@ -80,15 +80,11 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
     const reclaimedRuntimeId = String((payload as { session_id?: string } | undefined)?.session_id ?? '')
 
     if (reclaimedRuntimeId) {
-      dropSessionState(reclaimedRuntimeId)
-      // A tile bound to the reclaimed runtime would otherwise render an
-      // empty transcript forever: its view reads $sessionStates[runtime]
-      // (just dropped) and its resume effect is gated on !runtimeId, so a
-      // bound tile never re-resumes (#82620). Unbind it so the effect
-      // refires against the intact stored session — and purge the wiring
-      // cache's entry, or resumeTile's warm path would hand the dead
-      // runtime straight back instead of cold-resuming a live one.
+      // Park the transcript on the tile BEFORE dropping state — otherwise
+      // SessionTilePane sees !runtimeId + empty messages and paints the
+      // centered Hermes loader (the session-mode "page refresh").
       unbindTileRuntime(reclaimedRuntimeId)
+      dropSessionState(reclaimedRuntimeId)
       deps.sessionStateByRuntimeIdRef.current.delete(reclaimedRuntimeId)
     }
 

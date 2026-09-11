@@ -4,6 +4,7 @@ import { resetLiveRuntimeTracking } from '@/app/contrib/hooks/use-background-syn
 import { resetSidebarBatchCapability } from '@/hermes'
 import { invalidateProfileScopedQueries } from '@/lib/query-client'
 import { clearArtifactRegistry } from '@/store/artifacts'
+import { runningBackgroundRuntimeIds } from '@/store/composer-status'
 import { invalidateCronJobsRequests, setCronJobs } from '@/store/cron'
 import { resetSessionsLimit } from '@/store/layout'
 import { resetLiveSync } from '@/store/live-sync'
@@ -24,7 +25,7 @@ import {
   setSessionsLoading
 } from '@/store/session'
 import { resetSessionPinMirror } from '@/store/session-pin-sync'
-import { clearAllSessionStates } from '@/store/session-states'
+import { clearIdleSessionStates } from '@/store/session-states'
 import { clearTranscriptTails } from '@/store/transcript-tail-cache'
 
 // True while a connection switch is mid-flight — a Settings → Gateway apply
@@ -198,14 +199,14 @@ export function wipeSessionListsForGatewaySwitch(): void {
   setMessagingSessions([])
   setMessagingPlatformTotals({})
   setMessagingTruncated(false)
-  // Clearing $sessionStates automatically clears $workingSessionIds and
-  // $attentionSessionIds (computed) and $stalledSessionIds (owned beside it).
-  // $unreadFinishedSessionIds is separate, so wipe it explicitly. Only the
-  // transient paint layer is wiped: the persisted markers/watermarks in
-  // session-unread.ts are keyed by durable session id and repaint the rows
-  // that are still unread once the next gateway's lists load — so a profile
-  // round-trip doesn't swallow green dots.
-  clearAllSessionStates()
+  // Idle session view-state is wiped so the next gateway's sidebar doesn't
+  // paint the previous source's rows. In-flight work (busy / needs-input /
+  // background processes) stays: clearing it emptied $workingSessionIds and
+  // let pruneSecondaryGateways close the socket that still had a running job
+  // when you switched profiles. $unreadFinishedSessionIds is separate, so
+  // wipe it explicitly. Persisted unread markers in session-unread.ts are
+  // keyed by durable session id and repaint once the next lists load.
+  clearIdleSessionStates(runningBackgroundRuntimeIds())
   resetLiveRuntimeTracking()
   resetLiveSync()
   $unreadFinishedSessionIds.set([])

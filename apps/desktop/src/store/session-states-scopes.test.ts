@@ -4,7 +4,9 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import {
   $sessionStates,
   $sessionTiles,
+  $workingSessionIds,
   clearAllSessionStates,
+  clearIdleSessionStates,
   dropSessionState,
   liveSessionScopes,
   openTileGatewayScopes,
@@ -80,6 +82,20 @@ describe('liveSessionScopes', () => {
 
     expect(liveSessionScopes()).toEqual(new Set())
   })
+
+  it('keeps a settled session when extraRuntimeIds names it (background process)', () => {
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'default', session_id: 'rt-bg' })
+    publishSessionState('rt-bg', state({ busy: false, needsInput: false }))
+
+    expect(liveSessionScopes()).toEqual(new Set())
+    expect(liveSessionScopes(['rt-bg'])).toEqual(new Set(['conn:homelab::default']))
+  })
+
+  it('keeps extra runtime ids even after the view-state is gone', () => {
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'default', session_id: 'rt-gone' })
+
+    expect(liveSessionScopes(['rt-gone'])).toEqual(new Set(['conn:homelab::default']))
+  })
 })
 
 describe('openTileGatewayScopes', () => {
@@ -135,5 +151,25 @@ describe('openTileGatewayScopes', () => {
     $sessionTiles.set([{ storedSessionId: 'plain' }])
 
     expect(openTileGatewayScopes()).toEqual(new Set())
+  })
+})
+
+describe('clearIdleSessionStates', () => {
+  it('drops idle runtimes and keeps busy / extra (background) runtimes', () => {
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'default', session_id: 'rt-busy' })
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'default', session_id: 'rt-idle' })
+    recordSessionEventScope({ connectionId: 'homelab', profile: 'default', session_id: 'rt-bg' })
+    publishSessionState('rt-busy', state({ busy: true, storedSessionId: 'stored-busy' }))
+    publishSessionState('rt-idle', state({ busy: false, storedSessionId: 'stored-idle' }))
+    publishSessionState('rt-bg', state({ busy: false, storedSessionId: 'stored-bg' }))
+
+    clearIdleSessionStates(['rt-bg'])
+
+    expect($sessionStates.get()['rt-busy']?.busy).toBe(true)
+    expect($sessionStates.get()['rt-idle']).toBeUndefined()
+    expect($sessionStates.get()['rt-bg']?.storedSessionId).toBe('stored-bg')
+    expect($workingSessionIds.get()).toContain('stored-busy')
+    expect($workingSessionIds.get()).not.toContain('stored-idle')
+    expect(liveSessionScopes(['rt-bg'])).toEqual(new Set(['conn:homelab::default']))
   })
 })

@@ -76,6 +76,21 @@ export const $backgroundRunningSessionIds = computed(
   }
 )
 
+/** Runtime ids with at least one RUNNING background process. Gateway keep-set
+ *  / wipe-preserve use these (not stored ids) because `liveSessionScopes` and
+ *  `$sessionStates` are keyed by runtime. */
+export function runningBackgroundRuntimeIds(): string[] {
+  const ids: string[] = []
+
+  for (const [runtimeId, items] of Object.entries($backgroundStatusBySession.get())) {
+    if (items.some(item => item.state === 'running')) {
+      ids.push(runtimeId)
+    }
+  }
+
+  return ids
+}
+
 // Rows the user X-ed away. The registry keeps finished processes around for a
 // while, so without this every refresh would resurrect a dismissed row.
 const dismissedBySession = new Map<string, Set<string>>()

@@ -85,12 +85,17 @@ export function recordSessionEventScope(event: { connectionId?: string; profile?
 
 /** Composite scopes of registry-sourced sessions that are live (busy or
  * waiting on input) — the (connectionId, profile) half of the gateway
- * keep-set. Local-source live work keeps flowing through profile names. */
-export function liveSessionScopes(): Set<string> {
+ * keep-set. Local-source live work keeps flowing through profile names.
+ *
+ * `extraRuntimeIds` covers work that is NOT `busy` (a finished turn that
+ * still has `terminal(background=true)` children): without it the keep-set
+ * drops the socket and ws_orphan_reap kills the jobs. */
+export function liveSessionScopes(extraRuntimeIds?: Iterable<string>): Set<string> {
   const scopes = new Set<string>()
+  const extra = extraRuntimeIds ? new Set(extraRuntimeIds) : null
 
   for (const [runtimeId, state] of Object.entries($sessionStates.get())) {
-    if (!state || (!state.busy && !state.needsInput)) {
+    if (!state || (!state.busy && !state.needsInput && !extra?.has(runtimeId))) {
       continue
     }
 
@@ -98,6 +103,19 @@ export function liveSessionScopes(): Set<string> {
 
     if (scope) {
       scopes.add(scope)
+    }
+  }
+
+  // A background process can outlive the LLM turn's busy flag. If wipe-preserve
+  // kept the runtime id but the view-state was already released, still PIN the
+  // socket from the recorded event scope.
+  if (extra) {
+    for (const runtimeId of extra) {
+      const scope = sessionScopeByRuntimeId.get(runtimeId)
+
+      if (scope) {
+        scopes.add(scope)
+      }
     }
   }
 
@@ -530,6 +548,41 @@ export function clearAllSessionStates() {
   $sessionStates.set({})
 }
 
+/** Drop idle session view-state while keeping in-flight work.
+ *
+ *  Profile/connection switches used to call `clearAllSessionStates()`, which
+ *  emptied `$workingSessionIds` and let `pruneSecondaryGateways` close the
+ *  socket that still had a running turn or background process — jobs died
+ *  when you tabbed to another profile. Extra runtime ids (background
+ *  processes whose LLM turn already finished) stay too. */
+export function clearIdleSessionStates(keepRuntimeIds: Iterable<string> = []): void {
+  const keep = new Set(keepRuntimeIds)
+  const current = $sessionStates.get()
+  const next: Record<string, ClientSessionState> = {}
+
+  for (const [runtimeId, state] of Object.entries(current)) {
+    if (keep.has(runtimeId) || state.busy || state.needsInput || state.awaitingResponse) {
+      next[runtimeId] = state
+      continue
+    }
+
+    clearWatchdog(runtimeId)
+    clearSessionProviderWait(runtimeId)
+    sessionScopeByRuntimeId.delete(runtimeId)
+    setSessionStalled(state.storedSessionId, false)
+  }
+
+  $sessionStates.set(next)
+
+  const liveStored = new Set(
+    Object.values(next)
+      .map(state => state.storedSessionId)
+      .filter((id): id is string => Boolean(id))
+  )
+
+  $stalledSessionIds.set($stalledSessionIds.get().filter(id => liveStored.has(id)))
+}
+
 /** Downgrade cached busy/awaiting states after a gateway reconnect.
  *
  *  A respawned backend re-mints runtime ids (the same fact that drives
@@ -712,6 +765,8 @@ export interface SessionTile {
   before?: null | string
   /** Live runtime id once the tile's resume has bound one. */
   runtimeId?: string
+  /** Last transcript kept while runtimeId is cleared for rebind. Not persisted. */
+  parkedMessages?: ClientSessionState['messages']
   /** Resume failed terminally (shown in the tile; retryable). */
   error?: string
   /** Presentation workspace this tab belongs to. Missing legacy values are Sessions. */
@@ -910,7 +965,21 @@ if (!isSecondaryWindow() && !isBrowserWindow()) {
 }
 
 export function patchSessionTile(storedSessionId: string, patch: Partial<SessionTile>) {
-  saveTiles($sessionTiles.get().map(t => (t.storedSessionId === storedSessionId ? { ...t, ...patch } : t)))
+  saveTiles(
+    $sessionTiles.get().map(t => {
+      if (t.storedSessionId !== storedSessionId) {
+        return t
+      }
+
+      const next = { ...t, ...patch }
+
+      if (patch.runtimeId) {
+        delete next.parkedMessages
+      }
+
+      return next
+    })
+  )
 }
 
 export function sessionTileOwnerRoute(storedSessionId: string): SessionOwnerRoute | undefined {
@@ -1118,6 +1187,25 @@ export interface UnknownRuntimeReconnectScope {
   liveConnectionIds: ReadonlySet<string>
 }
 
+function parkedMessagesForRuntime(runtimeId: string | undefined): ClientSessionState['messages'] | undefined {
+  if (!runtimeId) {
+    return undefined
+  }
+
+  const messages = $sessionStates.get()[runtimeId]?.messages
+
+  return messages?.length ? messages : undefined
+}
+
+function tileWithParkedTranscript(tile: SessionTile): SessionTile {
+  const parked = parkedMessagesForRuntime(tile.runtimeId)
+
+  return {
+    ...toStored(tile),
+    ...(parked ? { parkedMessages: parked } : tile.parkedMessages ? { parkedMessages: tile.parkedMessages } : {})
+  }
+}
+
 export function resetTileRuntimeBindings(
   reconnectedScope?: null | string | RuntimeReconnectScope | UnknownRuntimeReconnectScope
 ) {
@@ -1168,7 +1256,7 @@ export function resetTileRuntimeBindings(
   sessionTileDelegate()?.invalidateRuntimeBindings?.(preservedStoredIds)
 
   if (tiles.some(tile => tile.runtimeId && !preservedStoredIds.has(tile.storedSessionId))) {
-    $sessionTiles.set(tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : toStored(tile))))
+    $sessionTiles.set(tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : tileWithParkedTranscript(tile))))
   }
 }
 
@@ -1184,9 +1272,16 @@ export function resetTileRuntimeBindings(
  *  intact, only its live runtime was reclaimed. */
 export function unbindTileRuntime(runtimeId: string) {
   const tiles = $sessionTiles.get()
+  const parked = parkedMessagesForRuntime(runtimeId)
 
   if (tiles.some(t => t.runtimeId === runtimeId)) {
-    $sessionTiles.set(tiles.map(t => (t.runtimeId === runtimeId ? { ...t, runtimeId: undefined } : t)))
+    $sessionTiles.set(
+      tiles.map(t =>
+        t.runtimeId === runtimeId
+          ? { ...t, runtimeId: undefined, ...(parked ? { parkedMessages: parked } : {}) }
+          : t
+      )
+    )
   }
 }
 
