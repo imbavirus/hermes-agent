@@ -19,6 +19,7 @@ import {
   setCurrentProvider,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
+  setMessages,
   setTurnStartedAt
 } from '@/store/session'
 import {
@@ -106,19 +107,18 @@ function Harness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessP
 
 describe('useSessionStateCache — per-session turn timer', () => {
   beforeEach(() => {
-    // The view-sync flush runs on a real rAF in the browser path; in jsdom we
-    // want it synchronous so the global mirror is observable immediately. The
-    // hook closes over `window.requestAnimationFrame`, so stub that exact ref.
-    // Return null (not a handle) so the hook's `viewSyncRafRef.current = rAF(...)`
-    // assignment doesn't overwrite the null the synchronous callback just set —
-    // otherwise the ref reads truthy and the NEXT sync is suppressed (a real
-    // browser returns a handle but runs the callback async, so this race is a
-    // test-only artifact of firing synchronously).
-    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
-      cb(0)
+    // The view-sync flush runs on setTimeout(0) so a hidden/occluded window
+    // still paints (rAF is paused at 0fps). In jsdom run it synchronously so
+    // the global mirror is observable immediately. Return null (not a handle)
+    // so the hook's `viewSyncTimerRef.current = setTimeout(...)` assignment
+    // doesn't overwrite the null the synchronous callback just set.
+    vi.spyOn(window, 'setTimeout').mockImplementation(((cb: TimerHandler) => {
+      if (typeof cb === 'function') {
+        cb()
+      }
 
       return null as unknown as number
-    })
+    }) as typeof setTimeout)
     setTurnStartedAt(null)
     setCurrentModel('')
     setCurrentProvider('')
@@ -264,6 +264,79 @@ describe('useSessionStateCache — per-session turn timer', () => {
     expect($currentReasoningEffort.get()).toBe('')
     expect($currentServiceTier.get()).toBe('')
     expect($currentFastMode.get()).toBe(false)
+  })
+})
+
+describe('useSessionStateCache — tab-back paints background transcript', () => {
+  beforeEach(() => {
+    vi.spyOn(window, 'setTimeout').mockImplementation(((cb: TimerHandler) => {
+      if (typeof cb === 'function') {
+        cb()
+      }
+
+      return null as unknown as number
+    }) as typeof setTimeout)
+    setMessages([])
+    setActiveSessionId('fg-runtime')
+  })
+
+  afterEach(() => {
+    cleanup()
+    setMessages([])
+    setActiveSessionId(null)
+    vi.restoreAllMocks()
+  })
+
+  it('paints a background session transcript when it becomes focused, without a manual flush', () => {
+    const reply: ChatMessage = {
+      id: 'a1',
+      role: 'assistant',
+      parts: [{ type: 'text', text: 'Bindless V# is in.' }],
+      timestamp: 1
+    }
+
+    function PaintHarness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessProps) {
+      const busyRef: MutableRefObject<boolean> = { current: false }
+      const cache = useSessionStateCache({
+        activeSessionId,
+        busyRef,
+        selectedStoredSessionId,
+        setAwaitingResponse: () => undefined,
+        setBusy: () => undefined,
+        setMessages
+      })
+      onReady(cache)
+      return null
+    }
+
+    let cache!: Cache
+    const { rerender } = render(
+      <PaintHarness
+        activeSessionId="fg-runtime"
+        onReady={c => (cache = c)}
+        selectedStoredSessionId="fg-stored"
+      />
+    )
+
+    act(() => {
+      cache.updateSessionState(
+        'bg-runtime',
+        state => ({ ...state, busy: false, messages: [reply] }),
+        'bg-stored'
+      )
+    })
+
+    expect($messages.get()).not.toEqual([reply])
+
+    rerender(
+      <PaintHarness
+        activeSessionId="bg-runtime"
+        onReady={c => (cache = c)}
+        selectedStoredSessionId="bg-stored"
+      />
+    )
+
+    expect($messages.get()).toEqual([reply])
   })
 })
 

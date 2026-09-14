@@ -14602,6 +14602,53 @@ def test_teardown_ends_session_in_profile_db(monkeypatch, tmp_path):
     assert str(seen.get("db_path")).endswith("state.db")
 
 
+def test_ws_orphan_reap_teardown_does_not_end_stored_session(monkeypatch, tmp_path):
+    """Detached WS after a finished turn must not stamp ended_at.
+
+    Desktop tab-away / profile switch detaches the socket. The turn (and its
+    SQLite transcript) must stay an open conversation so tab-back hydrates the
+    full reply. Ending the row is what made a finished chat look dead.
+    """
+    profile_home = tmp_path / "profiles" / "kytyps5"
+    profile_home.mkdir(parents=True)
+    seen: dict = {}
+
+    class LaunchDB:
+        def get_session(self, _key):
+            seen["launch"] = True
+            return {"id": _key, "source": "desktop"}
+
+        def end_session(self, _key, _reason):
+            seen["launch_end"] = True
+
+    class ProfileDB:
+        def __init__(self, db_path=None):
+            seen["db_path"] = db_path
+
+        def get_session(self, _key):
+            seen["profile"] = True
+            return {"id": _key, "source": "desktop"}
+
+        def end_session(self, key, reason):
+            seen["ended"] = (key, reason)
+
+        def close(self):
+            seen["closed"] = True
+
+    monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
+    monkeypatch.setattr("hermes_state.SessionDB", ProfileDB)
+    session = {
+        "session_key": "20260910_151552_9aab4d",
+        "profile_home": str(profile_home),
+        "agent": None,
+        "history": [{"role": "assistant", "content": "Bindless V# is in."}],
+        "source": "desktop",
+    }
+    server._teardown_session(session, end_reason="ws_orphan_reap")
+    assert "ended" not in seen
+    assert seen.get("launch_end") is None
+
+
 def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
     """session.branch must copy history into the parent's profile state.db."""
     profile_home = tmp_path / "profiles" / "mlperf"

@@ -857,6 +857,12 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     # Use session_id (from agent.session_id) not session_key — after compression,
     # session_key may be stale (the ended parent) while session_id is the live
     # continuation. Fix for #20001.
+    #
+    # ws_orphan_reap is NOT a user close. Desktop tab-away / profile switch
+    # detaches the WS; the turn may already have finished and been persisted.
+    # Stamping ended_at here is what made a finished chat look dead when the
+    # user tabbed back (transcript in SQLite, row closed). Park the in-memory
+    # runtime, leave the stored conversation open.
     _tui_owns_lifecycle = True
     if session_id:
         try:
@@ -874,7 +880,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                     row = db.get_session(session_id)
                     source = (row or {}).get("source", "")
                     _tui_owns_lifecycle = not _is_gateway_owned_source(source)
-                    if _tui_owns_lifecycle:
+                    if _tui_owns_lifecycle and end_reason != "ws_orphan_reap":
                         db.end_session(session_id, end_reason)
         except Exception:
             pass

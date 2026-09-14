@@ -74,9 +74,9 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
     // The backend reclaimed a live session we may still be holding (idle
     // TTL, LRU cap, or the WS-orphan reap). Without this the runtime id
     // stays cached until something fails against it, which reads as the
-    // session vanishing rather than being reclaimed. Drop the cached state
-    // now — the stored row is untouched, so the sidebar keeps the
-    // conversation and reopening it resumes from the DB.
+    // session vanishing rather than being reclaimed. Drop the cached runtime
+    // now — the stored row stays open (orphan reap must not stamp ended_at),
+    // so the sidebar keeps the conversation and reopening it resumes from DB.
     const reclaimedRuntimeId = String((payload as { session_id?: string } | undefined)?.session_id ?? '')
 
     if (reclaimedRuntimeId) {
@@ -88,7 +88,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       deps.sessionStateByRuntimeIdRef.current.delete(reclaimedRuntimeId)
     }
 
-    // The row's ended_at moved, so refresh the lists that render it.
+    // Activity/title may have moved while we were on another chat.
     notifySessionsChanged()
 
     return true

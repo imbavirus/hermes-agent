@@ -123,7 +123,7 @@ export function useSessionStateCache({
 
   const sessionStateCache = sessionStateByRuntimeIdRef.current
   const pendingViewStateRef = useRef<{ sessionId: string; state: ClientSessionState } | null>(null)
-  const viewSyncRafRef = useRef<number | null>(null)
+  const viewSyncTimerRef = useRef<number | null>(null)
   // Runtime id whose transcript currently occupies `$messages` — lets the
   // flush below tell a same-session refresh from a thread switch.
   const viewSessionIdRef = useRef<string | null>(null)
@@ -191,14 +191,14 @@ export function useSessionStateCache({
   )
 
   const resetViewSync = useCallback(() => {
-    // Drop any RAF-pending transcript stage so a backgrounded turn cannot
+    // Drop any timer-pending transcript stage so a backgrounded turn cannot
     // repaint over the chat the user just switched to (#47709 / #47743).
     pendingViewStateRef.current = null
     viewSessionIdRef.current = null
 
-    if (viewSyncRafRef.current !== null && typeof window !== 'undefined') {
-      window.cancelAnimationFrame(viewSyncRafRef.current)
-      viewSyncRafRef.current = null
+    if (viewSyncTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(viewSyncTimerRef.current)
+      viewSyncTimerRef.current = null
     }
   }, [])
 
@@ -269,21 +269,18 @@ export function useSessionStateCache({
       pendingViewStateRef.current = { sessionId, state }
 
       // Terminal / attention transitions (turn finished, error, or the agent is
-      // now waiting on the user) MUST reach the view immediately. Electron
-      // throttles `requestAnimationFrame` to ~0 while the window is
-      // backgrounded, occluded, or unfocused, so an RAF-deferred flush can be
-      // stranded in `pendingViewStateRef` indefinitely — that's the "new chat
-      // stuck on Thinking until I refocus / F5" bug. Flush these synchronously
-      // (cancelling any in-flight RAF, since we're about to publish the latest
-      // state anyway). The plain busy heartbeat stays RAF-batched: that
-      // coalescing exists only to keep periodic `session.info` updates from
-      // churning `$messages` and jerking the scroll position while reading.
+      // now waiting on the user) MUST reach the view immediately. A deferred
+      // flush can otherwise sit in `pendingViewStateRef` until the next tick —
+      // that's the "new chat stuck on Thinking until I refocus / F5" bug. Flush
+      // these synchronously (cancelling any in-flight timer). The plain busy
+      // heartbeat stays timer-batched so periodic `session.info` updates don't
+      // churn `$messages` and jerk the scroll position while reading.
       const isCriticalTransition = !state.busy || state.needsInput
 
       if (isCriticalTransition) {
-        if (viewSyncRafRef.current !== null && typeof window !== 'undefined') {
-          window.cancelAnimationFrame(viewSyncRafRef.current)
-          viewSyncRafRef.current = null
+        if (viewSyncTimerRef.current !== null && typeof window !== 'undefined') {
+          window.clearTimeout(viewSyncTimerRef.current)
+          viewSyncTimerRef.current = null
         }
 
         flushPendingViewState()
@@ -291,7 +288,7 @@ export function useSessionStateCache({
         return
       }
 
-      if (viewSyncRafRef.current !== null) {
+      if (viewSyncTimerRef.current !== null) {
         return
       }
 
@@ -301,19 +298,24 @@ export function useSessionStateCache({
         return
       }
 
-      viewSyncRafRef.current = window.requestAnimationFrame(() => {
-        viewSyncRafRef.current = null
+      // Timer, not rAF. Chromium pauses requestAnimationFrame while the
+      // window is occluded/unfocused, so a busy stream's $messages never
+      // painted until refocus — tab-out looked like the job froze. Timers
+      // still coalesce (one pending handle) and stream-throttle lifts the
+      // background clamp for the life of the turn.
+      viewSyncTimerRef.current = window.setTimeout(() => {
+        viewSyncTimerRef.current = null
         flushPendingViewState()
-      })
+      }, 0)
     },
     [flushPendingViewState]
   )
 
   useEffect(
     () => () => {
-      if (viewSyncRafRef.current !== null && typeof window !== 'undefined') {
-        window.cancelAnimationFrame(viewSyncRafRef.current)
-        viewSyncRafRef.current = null
+      if (viewSyncTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(viewSyncTimerRef.current)
+        viewSyncTimerRef.current = null
       }
     },
     []
@@ -362,6 +364,24 @@ export function useSessionStateCache({
   useEffect(() => {
     sessionStateCache.prune()
   }, [activeSessionId, selectedStoredSessionId, sessionStateCache, sessionTiles])
+
+  // Tab-back / chat switch: the cache already recorded every background
+  // stream event (updateSessionState never drops those). The shared
+  // `$messages` view is focus-only, so without this flush a finished reply
+  // sits in the cache until the next activate RPC — "it happened but didn't
+  // paint." Publish the newly-focused cache entry immediately.
+  useEffect(() => {
+    if (!activeSessionId) {
+      return
+    }
+
+    const cached = sessionStateCache.get(activeSessionId)
+    if (!cached) {
+      return
+    }
+
+    syncSessionStateToView(activeSessionId, cached)
+  }, [activeSessionId, sessionStateCache, syncSessionStateToView])
 
   const getRuntimeIdForStoredSession = useCallback(
     (storedSessionId: string): string | null => {
