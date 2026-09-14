@@ -71,23 +71,15 @@ describe('decideLivenessForceClose', () => {
 
 describe('shouldNudgeReconnectOnFocus', () => {
   it('skips the focus ping while a turn is in flight (false-kill / focus-steal loop)', () => {
-    expect(
-      shouldNudgeReconnectOnFocus({ msSinceLastNudge: 60_000, workingSessionCount: 1 })
-    ).toBe(false)
+    expect(shouldNudgeReconnectOnFocus({ msSinceLastNudge: 60_000, workingSessionCount: 1 })).toBe(false)
   })
 
   it('skips a focus ping that landed inside the debounce window', () => {
-    expect(
-      shouldNudgeReconnectOnFocus({ msSinceLastNudge: 0, workingSessionCount: 0 })
-    ).toBe(false)
-    expect(
-      shouldNudgeReconnectOnFocus({ msSinceLastNudge: 1_000, workingSessionCount: 0 })
-    ).toBe(false)
+    expect(shouldNudgeReconnectOnFocus({ msSinceLastNudge: 0, workingSessionCount: 0 })).toBe(false)
+    expect(shouldNudgeReconnectOnFocus({ msSinceLastNudge: 1_000, workingSessionCount: 0 })).toBe(false)
   })
 
   it('nudges when idle and the debounce has elapsed', () => {
-    expect(
-      shouldNudgeReconnectOnFocus({ msSinceLastNudge: 15_000, workingSessionCount: 0 })
-    ).toBe(true)
+    expect(shouldNudgeReconnectOnFocus({ msSinceLastNudge: 15_000, workingSessionCount: 0 })).toBe(true)
   })
 })

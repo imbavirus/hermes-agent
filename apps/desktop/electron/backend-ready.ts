@@ -116,9 +116,7 @@ function waitForDashboardPort(
     const timer = setTimeout(() => {
       cleanup()
       reject(
-        new Error(
-          `Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${describeOutputTail()}`
-        )
+        new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${describeOutputTail()}`)
       )
     }, timeoutMs)
 
@@ -200,9 +198,7 @@ function waitForDashboardReadyFile(
     const timer = setTimeout(() => {
       cleanup()
       reject(
-        new Error(
-          `Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${describeOutputTail()}`
-        )
+        new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)${describeOutputTail()}`)
       )
     }, timeoutMs)
 

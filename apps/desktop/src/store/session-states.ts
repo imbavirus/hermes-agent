@@ -86,6 +86,7 @@ export function recordSessionEventScope(event: { connectionId?: string; profile?
 
   if (event.connectionId) {
     sessionScopeByRuntimeId.set(event.session_id, registryBackendScopeKey(event.connectionId, event.profile))
+
     return
   }
 
@@ -577,6 +578,7 @@ export function clearIdleSessionStates(keepRuntimeIds: Iterable<string> = []): v
   for (const [runtimeId, state] of Object.entries(current)) {
     if (keep.has(runtimeId) || state.busy || state.needsInput || state.awaitingResponse) {
       next[runtimeId] = state
+
       continue
     }
 
@@ -1270,7 +1272,9 @@ export function resetTileRuntimeBindings(
   sessionTileDelegate()?.invalidateRuntimeBindings?.(preservedStoredIds)
 
   if (tiles.some(tile => tile.runtimeId && !preservedStoredIds.has(tile.storedSessionId))) {
-    $sessionTiles.set(tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : tileWithParkedTranscript(tile))))
+    $sessionTiles.set(
+      tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : tileWithParkedTranscript(tile)))
+    )
   }
 }
 
@@ -1291,9 +1295,7 @@ export function unbindTileRuntime(runtimeId: string) {
   if (tiles.some(t => t.runtimeId === runtimeId)) {
     $sessionTiles.set(
       tiles.map(t =>
-        t.runtimeId === runtimeId
-          ? { ...t, runtimeId: undefined, ...(parked ? { parkedMessages: parked } : {}) }
-          : t
+        t.runtimeId === runtimeId ? { ...t, runtimeId: undefined, ...(parked ? { parkedMessages: parked } : {}) } : t
       )
     )
   }

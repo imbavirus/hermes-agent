@@ -46,9 +46,9 @@ import {
   type AgentProfileRoute,
   ensureGatewayAgent,
   ensureGatewayProfile,
+  mintingOwnerRouteForNewChat,
   normalizeProfileKey,
-  resolveNewChatOwnerRoute,
-  mintingOwnerRouteForNewChat
+  resolveNewChatOwnerRoute
 } from '@/store/profile'
 import {
   $projectScope,
@@ -595,7 +595,15 @@ export function useSessionActions({
           // server later returns its own preview/title and supersedes this.
           // The row carries the create route's exact owner (backend profile +
           // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, mintingOwnerRouteForNewChat(capturedRoute))
+          upsertOptimisticSession(
+            created,
+            stored,
+            null,
+            preview?.trim() || null,
+            null,
+            undefined,
+            mintingOwnerRouteForNewChat(capturedRoute)
+          )
           navigate(sessionRoute(stored), { replace: true })
           // Other windows (e.g. the main window when this is the pop-out) can't
           // see this session until they re-pull the shared list.
@@ -751,7 +759,15 @@ export function useSessionActions({
         // unlisted (draft) tab stays out of the session list until its first
         // turn persists and a refresh surfaces it.
         if (listed) {
-          upsertOptimisticSession(created, stored, null, null, null, undefined, mintingOwnerRouteForNewChat(capturedRoute))
+          upsertOptimisticSession(
+            created,
+            stored,
+            null,
+            null,
+            null,
+            undefined,
+            mintingOwnerRouteForNewChat(capturedRoute)
+          )
         }
 
         // A tile lives in its OWN worktree, so it must not run the full
@@ -769,10 +785,17 @@ export function useSessionActions({
         // patchSessionTile races the resume effect: the tile mounts with no
         // runtimeId, fail-closed session.resume fires (no owner on an unlisted
         // draft), and "+" paints "Couldn't open this session".
-        openSessionTile(stored, dir, undefined, undefined, {
-          ...workspaceScope,
-          ownerRoute: workspaceScope.ownerRoute ?? mintingRoute
-        }, { ownerRoute: workspaceScope.ownerRoute ?? mintingRoute, runtimeId: created.session_id })
+        openSessionTile(
+          stored,
+          dir,
+          undefined,
+          undefined,
+          {
+            ...workspaceScope,
+            ownerRoute: workspaceScope.ownerRoute ?? mintingRoute
+          },
+          { ownerRoute: workspaceScope.ownerRoute ?? mintingRoute, runtimeId: created.session_id }
+        )
 
         if (dir === 'center' && runtimeInfo?.cwd) {
           setCurrentCwdTransient(runtimeInfo.cwd)

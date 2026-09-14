@@ -521,7 +521,8 @@ const ChatViewContent = memo(function ChatViewContent({
   // Hide the composer in the exhausted error state too: there's no live runtime
   // to send to until a retry rebinds one. Watch windows are pure spectators of a
   // subagent run driven elsewhere — no composer, transcript is read-only.
-  const showChatBar = !loadingSession && !resumeExhausted && !isWatchWindow() && (!isRoutedSessionView || Boolean(activeSessionId))
+  const showChatBar =
+    !loadingSession && !resumeExhausted && !isWatchWindow() && (!isRoutedSessionView || Boolean(activeSessionId))
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({

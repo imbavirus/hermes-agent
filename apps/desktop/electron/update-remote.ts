@@ -78,10 +78,10 @@ function resolveUpdateCheckUrl(_originUrl) {
 
 export {
   canonicalGitHubRemote,
+  INFERNOS_UPDATE_CANARY,
   isOfficialRemote,
   isOfficialSshRemote,
   isSshRemote,
-  INFERNOS_UPDATE_CANARY,
   OFFICIAL_REPO_CANONICAL,
   OFFICIAL_REPO_HTTPS_URL,
   resolveUpdateCheckUrl

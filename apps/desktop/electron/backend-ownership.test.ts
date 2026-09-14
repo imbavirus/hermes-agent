@@ -125,6 +125,7 @@ test('startup reap drops a dead PID without start-marker probes', async () => {
   const matchesParent = vi.fn(async () => undefined)
   const matchesIdentity = vi.fn(async () => true)
   const stop = vi.fn()
+
   const ownership = createOwnership(store, {
     matchesIdentity,
     matchesParent,

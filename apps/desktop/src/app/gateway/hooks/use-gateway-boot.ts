@@ -6,7 +6,11 @@ import type { HermesConnection } from '@/global'
 import { HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { desktopDefaultCwd } from '@/lib/desktop-fs'
-import { decideLivenessForceClose, LIVENESS_REPROBE_DELAY_MS, shouldNudgeReconnectOnFocus } from '@/lib/gateway-liveness-policy'
+import {
+  decideLivenessForceClose,
+  LIVENESS_REPROBE_DELAY_MS,
+  shouldNudgeReconnectOnFocus
+} from '@/lib/gateway-liveness-policy'
 import { reconnectBackoffDelayMs } from '@/lib/reconnect-backoff'
 import { BACKEND_BOOT_WAIT_TIMEOUT_MS, RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import {
@@ -44,6 +48,7 @@ import {
   isCurrentGatewaySwitch,
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import { notify, notifyError } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -64,7 +69,6 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
-import { $liveWorkSessionIds } from '@/store/live-work'
 import {
   $sessionOwnerHoldRevision,
   $sessionTiles,

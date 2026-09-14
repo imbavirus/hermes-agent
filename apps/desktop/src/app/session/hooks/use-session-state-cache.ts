@@ -376,6 +376,7 @@ export function useSessionStateCache({
     }
 
     const cached = sessionStateCache.get(activeSessionId)
+
     if (!cached) {
       return
     }

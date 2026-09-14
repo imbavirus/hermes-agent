@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $backgroundStatusBySession } from '@/store/composer-status'
 import { $sessionsLimit, resetSessionsLimit, SIDEBAR_SESSIONS_PAGE_SIZE } from '@/store/layout'
 import {
   $activeSessionId,
@@ -17,9 +19,15 @@ import {
   setSessions,
   setSessionsLoading
 } from '@/store/session'
-import { $sessionStates, $stalledSessionIds, $workingSessionIds, clearAllSessionStates, liveSessionScopes, publishSessionState, recordSessionEventScope } from '@/store/session-states'
-import { $backgroundStatusBySession } from '@/store/composer-status'
-import { createClientSessionState } from '@/lib/chat-runtime'
+import {
+  $sessionStates,
+  $stalledSessionIds,
+  $workingSessionIds,
+  clearAllSessionStates,
+  liveSessionScopes,
+  publishSessionState,
+  recordSessionEventScope
+} from '@/store/session-states'
 
 import {
   $gatewaySwitching,

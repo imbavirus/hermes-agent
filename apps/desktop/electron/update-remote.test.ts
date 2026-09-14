@@ -21,9 +21,9 @@ import { test } from 'vitest'
 
 import {
   canonicalGitHubRemote,
+  INFERNOS_UPDATE_CANARY,
   isOfficialRemote,
   isOfficialSshRemote,
-  INFERNOS_UPDATE_CANARY,
   isSshRemote,
   OFFICIAL_REPO_CANONICAL,
   OFFICIAL_REPO_HTTPS_URL,

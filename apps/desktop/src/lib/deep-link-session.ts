@@ -107,9 +107,7 @@ export function parseDeepLinkSessionAction(
 }
 
 /** Build a hermes:// URL for tests and CLI helpers. */
-export function buildSessionDeepLink(
-  action: DeepLinkSessionAction
-): string {
+export function buildSessionDeepLink(action: DeepLinkSessionAction): string {
   if (action.action === 'open') {
     return `hermes://session/open/${encodeURIComponent(action.storedSessionId)}`
   }
