@@ -5,6 +5,12 @@ import fs from 'node:fs'
 // works against both the headless backend and old/dashboard runtimes.
 const _READY_RE = /^HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/m
 
+// Same sentinel inside a MERGED stdout+stderr buffer (the spawn-time output tail, a remote
+// `>> log 2>&1` file): uvicorn's stderr chunks end without a newline, so the sentinel can be
+// spliced onto them (`...process [4711]HERMES_BACKEND_READY port=65238`) and `^` never lines up
+// (#103792). Match on a token boundary instead; `port=<digits>` keeps prose mentions out.
+export const READY_IN_MERGED_OUTPUT_RE = /(?<!\w)HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/
+
 // The announcement clock starts the instant the backend process is spawned —
 // before uvicorn binds its socket. On a cold install the child must first
 // compile and import the whole `hermes_cli.main` → `web_server` → FastAPI/
@@ -52,7 +58,7 @@ function resolvePortAnnounceTimeoutMs(env = process.env) {
  * backend spawns don't leak listener slots on the child.
  */
 function extractReadyPort(text: string): number | null {
-  const m = String(text).match(_READY_RE)
+  const m = String(text).match(READY_IN_MERGED_OUTPUT_RE) || String(text).match(_READY_RE)
 
   if (!m) {
     return null
@@ -67,9 +73,17 @@ function waitForDashboardPort(
   child,
   timeoutMs = resolvePortAnnounceTimeoutMs(),
   describeOutputTail = () => '',
-  initialText = ''
+  bufferedOutput: () => string = () => ''
 ) {
   return new Promise((resolve, reject) => {
+    // Seed the line buffer with any output the spawn-time tail already
+    // consumed (#60323): main.ts attaches its output tail at spawn, then
+    // awaits claimBackendChild + advanceBootProgress BEFORE this listener
+    // attaches. child.stdout is in flowing mode from the tail's listener, so
+    // a READY line flushed during that window is emitted once and never
+    // replayed to late listeners — the wait then times out at 90s and a
+    // healthy backend is killed. Scanning the tail's buffer (and seeding any
+    // trailing partial line) makes the listener-attach ordering irrelevant.
     let buf = ''
     let done = false
 
@@ -126,13 +140,20 @@ function waitForDashboardPort(
     child.on('exit', onExit)
     child.on('error', onError)
 
-    // Replay bytes already drained by an earlier stdout consumer (the spawn
-    // output-tail). claimBackendChild's Windows start-marker probe can take
-    // longer than a warm `hermes serve` needs to print READY; without this
-    // replay the waiter attaches after the line is gone and times out against
-    // a healthy backend.
-    if (initialText) {
-      onData(initialText)
+    // Listener is live — now recover a sentinel that was already flushed and
+    // consumed before this promise existed. The snapshot is taken AFTER the
+    // listener attaches, so no chunk can fall between snapshot and listener.
+    // Merged-buffer regex here (the tail interleaves both streams). Currently dormant: both
+    // main.ts callers attach the tail and build this wait in one synchronous block, so the
+    // snapshot is empty; any await reintroduced between them makes this the live path again.
+    if (!done) {
+      const alreadyBuffered = bufferedOutput()
+      const m = alreadyBuffered ? alreadyBuffered.match(READY_IN_MERGED_OUTPUT_RE) : null
+
+      if (m) {
+        cleanup()
+        resolve(parseInt(m[1], 10))
+      }
     }
   })
 }
@@ -221,6 +242,14 @@ function waitForDashboardReadyFile(
 function waitForDashboardPortAnnouncement(
   child,
   options: {
+    /**
+     * Returns the child's output buffered since SPAWN (the output tail's
+     * accumulated text, #60323). Scanned for an already-emitted READY
+     * sentinel so attaching this wait AFTER other awaits (backend claim,
+     * boot-progress IPC) can never lose the announcement: flowing-mode
+     * stdout never replays chunks to late listeners.
+     */
+    bufferedOutput?: () => string
     /** Returns a formatted stdout/stderr tail suffix for exit errors (#93608). */
     describeOutputTail?: () => string
     /** Bytes already read from the child before this waiter attached. */
@@ -231,7 +260,12 @@ function waitForDashboardPortAnnouncement(
 ) {
   const timeoutMs = options.timeoutMs ?? resolvePortAnnounceTimeoutMs()
   const describeOutputTail = options.describeOutputTail ?? (() => '')
-  const stdoutWait = waitForDashboardPort(child, timeoutMs, describeOutputTail, options.initialText)
+  const stdoutWait = waitForDashboardPort(
+    child,
+    timeoutMs,
+    describeOutputTail,
+    options.bufferedOutput ?? (() => options.initialText ?? '')
+  )
 
   if (!options.readyFile) {
     return stdoutWait

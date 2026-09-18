@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from hermes_state import SessionDB
 from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.event import MessageEvent
 from gateway.session import (
     SessionEntry,
     SessionSource,
@@ -193,6 +193,7 @@ class TestBuildSessionContextPrompt:
         from unittest.mock import patch
         from gateway.session import _slack_tools_loaded
         import tools.mcp_tool as _mcp_tool_mod
+        from tools import mcp_tool_registration as _mcp_registration
 
         # No native slack toolset / token configured.
         with patch.dict(_os.environ, {}, clear=False):
@@ -202,14 +203,14 @@ class TestBuildSessionContextPrompt:
             # registered a real tool, via the actual tracking function used
             # by the live registration path (tools/mcp_tool.py:_track_mcp_tool_server),
             # not a mock of the capability check.
-            _mcp_tool_mod._track_mcp_tool_server("mcp-company-slack_post_message", "company-slack")
+            _mcp_registration._track_mcp_tool_server("mcp-company-slack_post_message", "company-slack")
             try:
                 assert _slack_tools_loaded() is True, (
                     "A connected MCP server with 'slack' in its name and "
                     "registered tools must be detected as Slack capability"
                 )
             finally:
-                _mcp_tool_mod._forget_mcp_tool_server("mcp-company-slack_post_message")
+                _mcp_registration._forget_mcp_tool_server("mcp-company-slack_post_message")
 
 
     def test_shared_slack_prompt_warns_against_guessed_self_mentions(self):
@@ -490,6 +491,21 @@ class TestSessionStoreSwitchSession:
         assert resumed["ended_at"] is None
         assert resumed["end_reason"] is None
         db.close()
+
+    def test_switch_session_expected_session_id_refuses_moved_route(self, tmp_path):
+        """With ``expected_session_id`` the repoint is a CAS: a route that moved past the caller's
+        snapshot is left alone (None), while a matching snapshot still switches."""
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=GatewayConfig())
+        store._loaded = True
+        source = SessionSource(platform=Platform.FEISHU, chat_id="chat-2", chat_type="dm", user_id="user-2")
+        entry = store.get_or_create_session(source)
+
+        assert store.switch_session(entry.session_key, "target", expected_session_id="someone-else") is None
+        assert store.lookup_by_session_key(entry.session_key).session_id == entry.session_id
+
+        switched = store.switch_session(entry.session_key, "target", expected_session_id=entry.session_id)
+        assert switched is not None and switched.session_id == "target"
 
     def test_switch_session_rebinds_full_compression_lineage(self, tmp_path):
         from hermes_state import SessionDB
@@ -1474,7 +1490,7 @@ class TestGatewaySessionDbRecovery:
     def test_transcript_reroute_migrates_remaining_backlog_to_child(self):
         import threading
         from types import SimpleNamespace
-        from hermes_state import CompressionSessionClosedError
+        from hermes_state_errors import CompressionSessionClosedError
 
         class FakeDb:
             def get_compression_tip(self, session_id):
@@ -1541,14 +1557,28 @@ class TestGatewaySessionDbRecovery:
         assert "child" not in store._dirty_transcripts
 
 
-    def test_fts_corruption_error_does_not_match_false_positives(self):
-        """_is_fts_corruption_error must not match unrelated error strings
+    def test_fts_corruption_error_requires_fts_provenance(self):
+        """_is_fts_corruption_error must not treat a generic malformed-image
+        error as FTS-scoped (#97940): bare SQLITE_CORRUPT can mean canonical
+        B-tree damage. It must also not match unrelated error strings
         containing 'fts' as a substring (e.g. 'shifts', 'gifts')."""
-        assert SessionStore._is_fts_corruption_error(
+        import sqlite3
+
+        # Generic structural corruption: no FTS provenance -> fail closed.
+        assert not SessionStore._is_fts_corruption_error(
             RuntimeError("database disk image is malformed")
         )
+        assert not SessionStore._is_fts_corruption_error(
+            sqlite3.DatabaseError("database disk image is malformed")
+        )
+        # FTS-scoped errors remain eligible for the one-shot rebuild.
         assert SessionStore._is_fts_corruption_error(
             RuntimeError("no such table: messages_fts")
+        )
+        assert SessionStore._is_fts_corruption_error(
+            sqlite3.DatabaseError(
+                'fts5: corrupt structure record for table "messages_fts"'
+            )
         )
         assert not SessionStore._is_fts_corruption_error(
             RuntimeError("shifts were applied")

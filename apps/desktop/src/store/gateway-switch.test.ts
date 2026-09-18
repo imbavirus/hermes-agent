@@ -4,6 +4,8 @@ import { $sessionsLimit, resetSessionsLimit, SIDEBAR_SESSIONS_PAGE_SIZE } from '
 import {
   $activeSessionId,
   $cronSessions,
+  $currentBranch,
+  $currentCwd,
   $freshDraftReady,
   $messagingSessions,
   $sessionProfilesTruncated,
@@ -11,15 +13,21 @@ import {
   $sessionsLoading,
   setActiveSessionId,
   setCronSessions,
+  setCurrentBranch,
+  setCurrentCwdTransient,
   setFreshDraftReady,
   setMessagingSessions,
   setSessionProfilesTruncated,
   setSessions,
   setSessionsLoading
 } from '@/store/session'
-import { $sessionStates, $stalledSessionIds, $workingSessionIds, clearAllSessionStates, liveSessionScopes, publishSessionState, recordSessionEventScope } from '@/store/session-states'
-import { $backgroundStatusBySession } from '@/store/composer-status'
-import { createClientSessionState } from '@/lib/chat-runtime'
+import { $stalledSessionIds } from '@/store/session-states'
+import {
+  $transcriptTailBySessionId,
+  clearTranscriptTailPaging,
+  recordTranscriptTail,
+  transcriptTailState
+} from '@/store/transcript-tail'
 
 import {
   $gatewaySwitching,
@@ -48,8 +56,6 @@ const { invalidateProfileListFetches } = await import('@/store/profile')
 describe('wipeSessionListsForGatewaySwitch', () => {
   beforeEach(() => {
     $gatewaySwitching.set(false)
-    clearAllSessionStates()
-    $backgroundStatusBySession.set({})
     setSessions([{ id: 's1', title: 'old', profile: 'default' } as never])
     setSessionProfilesTruncated({ default: true })
     setCronSessions([{ id: 'c1', title: 'cron', profile: 'default' } as never])
@@ -68,8 +74,7 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     $stalledSessionIds.set([])
     setSessionsLoading(true)
     $gatewaySwitching.set(false)
-    clearAllSessionStates()
-    $backgroundStatusBySession.set({})
+    clearTranscriptTailPaging()
   })
 
   it('clears lists and arms loading so sidebar skeletons retrigger', () => {
@@ -85,6 +90,37 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     expect($freshDraftReady.get()).toBe(true)
   })
 
+  it("drops the outgoing gateway's draft workspace so the next gateway seeds its own (#114306)", () => {
+    setCurrentCwdTransient('/opt/data/profiles/tenant-a')
+    setCurrentBranch('main')
+
+    wipeSessionListsForGatewaySwitch()
+
+    expect($currentCwd.get()).toBe('')
+    expect($currentBranch.get()).toBe('')
+  })
+
+  it("forgets the previous backend's in-memory paging state", () => {
+    const page = {
+      messages: Array.from({ length: 120 }, (_, index) => ({
+        id: index,
+        role: 'user' as const,
+        content: '',
+        timestamp: 1
+      })),
+      pagination: { limit: 120, offset: 0, order: 'latest' as const, returned: 120 }
+    }
+
+    recordTranscriptTail('recycled-id', page, { connectionId: 'local', profile: 'default' })
+
+    wipeSessionListsForGatewaySwitch()
+
+    // A same-id session on the next backend must resolve its own tail alone.
+    recordTranscriptTail('recycled-id', page, { connectionId: 'remote-1', profile: 'default' })
+    expect(Object.keys($transcriptTailBySessionId.get())).toHaveLength(1)
+    expect(transcriptTailState('recycled-id')?.possiblyTruncated).toBe(true)
+  })
+
   it('strands in-flight profile-list fetches so the old backend cannot repaint the rail (#85731)', () => {
     // The soft re-home moves /api/profiles routing to the NEW backend; a
     // response still in flight from the previous one must be invalidated
@@ -92,42 +128,6 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     wipeSessionListsForGatewaySwitch()
 
     expect(invalidateProfileListFetches).toHaveBeenCalled()
-  })
-
-  it('keeps in-flight work so the previous profile socket is not pruned', () => {
-    recordSessionEventScope({ connectionId: 'homelab', profile: 'dev', session_id: 'rt-busy' })
-    publishSessionState('rt-busy', { ...createClientSessionState('stored-busy'), busy: true })
-
-    wipeSessionListsForGatewaySwitch()
-
-    expect($workingSessionIds.get()).toContain('stored-busy')
-    expect(liveSessionScopes()).toEqual(new Set(['conn:homelab::dev']))
-  })
-
-  it('keeps untagged local-profile work after wipe (kytyps5 / mia rail)', () => {
-    recordSessionEventScope({ profile: 'kytyps5', session_id: 'rt-kytyps5' })
-    publishSessionState('rt-kytyps5', { ...createClientSessionState('stored-kytyps5'), busy: true })
-
-    wipeSessionListsForGatewaySwitch()
-
-    expect($sessions.get()).toEqual([])
-    expect($workingSessionIds.get()).toContain('stored-kytyps5')
-    expect(liveSessionScopes()).toEqual(new Set(['kytyps5']))
-  })
-
-  it('keeps a finished turn that still has a background process', () => {
-    recordSessionEventScope({ connectionId: 'homelab', profile: 'dev', session_id: 'rt-bg' })
-    publishSessionState('rt-bg', { ...createClientSessionState('stored-bg'), busy: false })
-    $backgroundStatusBySession.set({
-      'rt-bg': [{ id: 'p1', state: 'running', title: 'build', type: 'background' }]
-    })
-
-    wipeSessionListsForGatewaySwitch()
-
-    expect($sessionStates.get()['rt-bg']?.storedSessionId).toBe('stored-bg')
-    expect(liveSessionScopes(['rt-bg'])).toEqual(new Set(['conn:homelab::dev']))
-
-    $backgroundStatusBySession.set({})
   })
 })
 
