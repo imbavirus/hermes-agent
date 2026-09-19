@@ -37,10 +37,10 @@ import { NEW_SESSION_TITLE, sessionTitle } from '@/lib/chat-runtime'
 import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
 import { createComposerAttachmentScope, draftTitleFor } from '@/store/composer'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import { sessionAwaitingInput } from '@/store/prompts'
-import { $liveWorkSessionIds } from '@/store/live-work'
 import {
   $gatewayState,
   $selectedStoredSessionId,

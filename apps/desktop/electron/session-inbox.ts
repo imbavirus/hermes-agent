@@ -102,6 +102,7 @@ function deliverFile(
     json = JSON.parse(text)
   } catch (err) {
     log(`[session-inbox] bad json ${path.basename(filePath)}: ${(err as Error).message}`)
+
     try {
       fs.unlinkSync(filePath)
     } catch {

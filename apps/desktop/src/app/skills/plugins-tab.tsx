@@ -376,6 +376,7 @@ export const PluginsTab = memo(function PluginsTab({
   useDeepLinkHighlight({ param: 'plugin', ready: () => true, elementId: pluginElementId })
 
   const agentBusy = (row: AgentPluginRow) => busyKey === (row.key ?? row.name) || busyKey === row.name
+
   const installedEntries = useMemo(() => parseCatalog('plugins', packages.map(pkg => ({
     name: pkg.name,
     identifier: pkg.agent?.catalog_name ?? pkg.desktop?.packageOrigin?.catalogName ?? pkg.key,
@@ -386,10 +387,13 @@ export const PluginsTab = memo(function PluginsTab({
     sha: pkg.agent?.installed_sha ?? pkg.desktop?.packageOrigin?.sha ?? '',
     version: pkg.agent?.version ?? ''
   }))).map((entry, index) => ({ ...entry, id: `installed:${packages[index].key}` })), [packages])
+
   const packageById = useMemo(() => new Map(packages.map(pkg => [`installed:${pkg.key}`, pkg])), [packages])
+
   const isInstalled = (entry: CatalogEntry) => packageById.has(entry.id) || agentRows.some(row =>
     (row.catalog_name === entry.name || row.name === entry.name) && !row.update_available
   )
+
   const install = (entry: CatalogEntry) => openPluginInstallRequest({
     catalogName: entry.name,
     profile: scope,

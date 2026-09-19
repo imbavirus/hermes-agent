@@ -44,6 +44,7 @@ import {
   isCurrentGatewaySwitch,
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import { notify, notifyError } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -64,7 +65,6 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
-import { $liveWorkSessionIds } from '@/store/live-work'
 import {
   $sessionOwnerHoldRevision,
   $sessionTiles,

@@ -297,6 +297,7 @@ describe('useSessionStateCache — tab-back paints background transcript', () =>
 
     function PaintHarness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessProps) {
       const busyRef: MutableRefObject<boolean> = { current: false }
+
       const cache = useSessionStateCache({
         activeSessionId,
         busyRef,
@@ -305,11 +306,14 @@ describe('useSessionStateCache — tab-back paints background transcript', () =>
         setBusy: () => undefined,
         setMessages
       })
+
       onReady(cache)
+
       return null
     }
 
     let cache!: Cache
+
     const { rerender } = render(
       <PaintHarness
         activeSessionId="fg-runtime"

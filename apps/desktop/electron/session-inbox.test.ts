@@ -12,10 +12,10 @@ import path from 'node:path'
 import { afterEach, test } from 'vitest'
 
 import {
+  type DeepLinkPayload,
   payloadToDeepLinkUrl,
   sessionInboxDir,
-  startSessionInboxWatcher,
-  type DeepLinkPayload
+  startSessionInboxWatcher
 } from './session-inbox'
 
 const tempHomes: string[] = []
@@ -33,6 +33,7 @@ afterEach(() => {
 function makeHome(): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-session-inbox-'))
   tempHomes.push(home)
+
   return home
 }
 
@@ -47,6 +48,7 @@ test('payloadToDeepLinkUrl builds session/new with params', () => {
     name: 'new',
     params: { title: 'T', cwd: 'C:/x', listed: '0' }
   })
+
   assert.ok(url.startsWith('hermes://session/new?'))
   const u = new URL(url)
   assert.equal(u.hostname, 'session')
@@ -61,6 +63,7 @@ test('payloadToDeepLinkUrl builds session/open/<id>', () => {
     name: 'open/abc123',
     params: {}
   })
+
   assert.ok(url.includes('session'))
   assert.ok(url.includes('open'))
   assert.ok(url.includes('abc123'))
@@ -80,6 +83,7 @@ test('watcher drains existing inbox JSON on start', async () => {
   )
 
   const delivered: DeepLinkPayload[] = []
+
   const stop = startSessionInboxWatcher({
     hermesHome: home,
     deliver: p => delivered.push(p)
@@ -98,6 +102,7 @@ test('watcher drains existing inbox JSON on start', async () => {
 test('watcher delivers newly written inbox file', async () => {
   const home = makeHome()
   const delivered: DeepLinkPayload[] = []
+
   const stop = startSessionInboxWatcher({
     hermesHome: home,
     deliver: p => delivered.push(p)
@@ -117,6 +122,7 @@ test('watcher delivers newly written inbox file', async () => {
 
   // watch is async with 50ms settle
   const deadline = Date.now() + 2000
+
   while (delivered.length === 0 && Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 50))
   }
@@ -134,10 +140,12 @@ test('bad json is ignored without throwing', () => {
   fs.writeFileSync(path.join(dir, 'bad.json'), '{not-json', 'utf8')
 
   const delivered: DeepLinkPayload[] = []
+
   const stop = startSessionInboxWatcher({
     hermesHome: home,
     deliver: p => delivered.push(p)
   })
+
   assert.equal(delivered.length, 0)
   stop()
 })

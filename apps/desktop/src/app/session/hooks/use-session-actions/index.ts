@@ -50,9 +50,9 @@ import {
   ensureGatewayAgent,
   ensureGatewayProfile,
   isLegacyNewChatProfile,
+  mintingOwnerRouteForNewChat,
   normalizeProfileKey,
-  resolveNewChatOwnerRoute,
-  mintingOwnerRouteForNewChat
+  resolveNewChatOwnerRoute
 } from '@/store/profile'
 import { $projectScope, resolveNewSessionCwd } from '@/store/projects'
 import { receiveApprovalRequest, replayPendingApproval } from '@/store/prompts'
@@ -899,6 +899,7 @@ export function useSessionActions({
             // moment on, including ambient creates (no capturedRoute).
             setSessionOwnerHint(stored, mintingRoute)
             holdSessionOwnerUntilForeground(stored, mintingRoute)
+
             if (legacyOwnerProfile) {
               // The tile below persists this bare owner as the stored-id hint;
               // bridge the create-to-mount gap with the same profile pool.

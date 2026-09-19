@@ -421,6 +421,7 @@ export async function listShimHolderPids(
       timeout: 8_000,
       windowsHide: true
     } as any)
+
     const parsed = JSON.parse(String((proc as any).stdout ?? ''))
 
     if (!parsed || parsed.ok !== true || !Array.isArray(parsed.pids)) {

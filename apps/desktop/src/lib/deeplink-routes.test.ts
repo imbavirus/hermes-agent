@@ -26,6 +26,7 @@ describe('resolveDeepLinkAction', () => {
       sha: '0123456789abcdef0123456789abcdef01234567',
       enable: '1'
     }
+
     const url = new URL(`hermes://plugin/install?${new URLSearchParams(params)}`)
 
     expect(resolveDeepLinkAction({
@@ -73,6 +74,7 @@ describe('resolveDeepLinkAction', () => {
     for (const params of invalidParams) {
       expect(resolveDeepLinkAction({ kind: 'skill', name: 'install', params })).toEqual({ type: 'ignore' })
     }
+
     expect(resolveDeepLinkAction({ kind: 'skill', name: 'remove', params: { identifier } })).toEqual({ type: 'ignore' })
     expect(resolveDeepLinkAction({ kind: 'plugin', name: 'install', params: {} })).toEqual({ type: 'ignore' })
   })

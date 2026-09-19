@@ -260,6 +260,7 @@ function waitForDashboardPortAnnouncement(
 ) {
   const timeoutMs = options.timeoutMs ?? resolvePortAnnounceTimeoutMs()
   const describeOutputTail = options.describeOutputTail ?? (() => '')
+
   const stdoutWait = waitForDashboardPort(
     child,
     timeoutMs,

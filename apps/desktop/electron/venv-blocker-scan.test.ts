@@ -267,6 +267,7 @@ describe('parseVenvBlockerScanOutput', () => {
 
     for (const cmdline of cmdlines) {
       assert.equal(isHermesRuntimeCmdline(cmdline), true, cmdline)
+
       const o = parseVenvBlockerScanOutput(
         ok({
           blocked: true,
@@ -529,6 +530,7 @@ describe('stopSafeVenvBlockers', () => {
 describe('stopHermesRuntimeBlockers', () => {
   it('taskkills only hermes-runtime PIDs, not other or local-preview', async () => {
     const killed: number[] = []
+
     const outcome = await stopHermesRuntimeBlockers(
       {
         blocked: true,
@@ -575,6 +577,7 @@ describe('stopHermesRuntimeBlockers', () => {
 
   it('taskkills leftover pack-debris npm/cmd, not Windows Terminal', async () => {
     const killed: number[] = []
+
     const outcome = await stopHermesRuntimeBlockers(
       {
         blocked: true,

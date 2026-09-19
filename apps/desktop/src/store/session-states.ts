@@ -686,6 +686,7 @@ export function clearIdleSessionStates(keepRuntimeIds: Iterable<string> = []): v
   for (const [runtimeId, state] of Object.entries(current)) {
     if (keep.has(runtimeId) || state.busy || state.needsInput || state.awaitingResponse) {
       next[runtimeId] = state
+
       continue
     }
 

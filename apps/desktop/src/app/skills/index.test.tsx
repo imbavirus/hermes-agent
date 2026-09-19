@@ -332,6 +332,7 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
     }
   ])('installs $identifier with its source-qualified target in the pinned connection and profile', async ({ source, identifier, expectedIdentifier }) => {
     const { installHubSkill } = await import('@/store/hub-actions')
+
     const entry = {
       name: 'community-research',
       identifier,
@@ -339,6 +340,7 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
       category: 'research',
       description: 'Community research workflow'
     }
+
     queryClient.setQueryData(['public-catalog', 'skills'], parseCatalog('skills', [
       { ...entry, name: 'other-skill', source: 'github', identifier: 'github:example/skills/other-skill' },
       entry
@@ -388,6 +390,7 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
         </MemoryRouter>
       </QueryClientProvider>
     )
+
     const view = render(scopedView('homelab', 'researcher'))
     fireEvent.click(screen.getByRole('button', { name: 'Browse' }))
     fireEvent.click(await screen.findByRole('button', { name: /^community-research/ }))
@@ -438,6 +441,7 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
         description: 'Research from the public snapshot'
       }]
     })
+
     vi.stubGlobal('fetch', fetchCatalog)
 
     await renderSkills() // ?tab=toolsets
