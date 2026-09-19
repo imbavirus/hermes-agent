@@ -101,20 +101,32 @@ def _save_xai_oauth_tokens(
 
     Pass ``set_active=False`` for side-tool bootstrap (TTS/setup, tools config, dashboard, refresh)
     so inference routing is unchanged.
+
+    A named profile without its own ``providers.xai-oauth`` block writes the
+    machine-root store (single-use refresh). A present profile block still
+    shadows — that is the rotation hazard; strip it instead of copying.
     """
-    from hermes_cli.auth import _auth_store_lock, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state, _utc_now_z
+    from hermes_cli.auth import (
+        _auth_file_path, _auth_store_lock, _global_auth_file_path, _load_auth_store,
+        _load_provider_state, _provider_state_in, _save_auth_store, _store_provider_state,
+        _utc_now_z,
+    )
     if last_refresh is None:
         last_refresh = _utc_now_z()
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
+    active = _auth_file_path()
+    own = _provider_state_in(_load_auth_store(), "xai-oauth") is not None
+    target = active if own else (_global_auth_file_path() or active)
+    with _auth_store_lock(target_path=target):
+        auth_store = _load_auth_store(target)
         state = _load_provider_state(auth_store, "xai-oauth") or {}
+        state.pop("last_auth_error", None)
         state.update(tokens=tokens, last_refresh=last_refresh, auth_mode=auth_mode)
         if discovery:
             state["discovery"] = discovery
         if redirect_uri:
             state["redirect_uri"] = redirect_uri
         _store_provider_state(auth_store, "xai-oauth", state, set_active=set_active)
-        _save_auth_store(auth_store)
+        _save_auth_store(auth_store, target_path=target)
 
 
 def _xai_jwt_exp(access_token: Any) -> Optional[float]:
@@ -345,23 +357,30 @@ def _quarantine_xai_oauth_tokens(exc: AuthError) -> None:
     """Clear dead xAI tokens after a terminal (400/401/403) refresh failure so later sessions fail fast.
 
     Best-effort: persistence failures are logged and swallowed; the caller re-raises regardless.
+    Writes the store the grant was read from (root when inherited) so a profile
+    quarantine cannot leave a shadowing empty ``providers.xai-oauth`` key.
     """
-    from hermes_cli.auth import _last_auth_error_marker, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state
+    from hermes_cli.auth import (
+        _auth_file_path, _auth_store_lock, _last_auth_error_marker, _load_auth_store,
+        _load_provider_state_with_source, _save_auth_store, _store_provider_state,
+    )
     try:
-        store = _load_auth_store()
-        state = _load_provider_state(store, "xai-oauth") or {}
-        tokens = dict(state.get("tokens") or {})
-        tokens.pop("access_token", None)
-        tokens.pop("refresh_token", None)
-        # Capture the previous singleton tokens BEFORE overwriting them. The pool-sync step uses this to
-        # distinguish legacy singleton-aliases (which should be refreshed) from independent accounts that
-        # ``hermes auth add openai-codex`` created (which must not be overwritten — see #39236).
-        state["tokens"] = tokens
-        state["last_auth_error"] = _last_auth_error_marker(
-            "xai-oauth", exc, reason="runtime_refresh_failure", default_code="xai_refresh_failed",
-        )
-        _store_provider_state(store, "xai-oauth", state, set_active=False)
-        _save_auth_store(store)
+        with _auth_store_lock():
+            active = _load_auth_store()
+            _state, source = _load_provider_state_with_source(active, "xai-oauth")
+            target = source or _auth_file_path()
+        with _auth_store_lock(target_path=target):
+            store = _load_auth_store(target)
+            state = dict(_state or {})
+            tokens = dict(state.get("tokens") or {})
+            tokens.pop("access_token", None)
+            tokens.pop("refresh_token", None)
+            state["tokens"] = tokens
+            state["last_auth_error"] = _last_auth_error_marker(
+                "xai-oauth", exc, reason="runtime_refresh_failure", default_code="xai_refresh_failed",
+            )
+            _store_provider_state(store, "xai-oauth", state, set_active=False)
+            _save_auth_store(store, target_path=target)
     except Exception as save_exc:
         logger.debug("xAI OAuth: failed to persist quarantined state: %s", save_exc)
 

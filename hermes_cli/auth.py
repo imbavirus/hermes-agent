@@ -486,6 +486,24 @@ def _same_path(left: Path, right: Path) -> bool:
         return left == right
 
 
+def _global_auth_file_path() -> Optional[Path]:
+    """Return the machine-root ``auth.json`` when this process is a named profile.
+
+    ``None`` in classic mode (HERMES_HOME is already the root). xAI's refresh
+    token is single-use — Infernos keeps that grant on the root store and lets
+    profiles inherit it. Other providers stay #111724-isolated.
+    """
+    try:
+        from hermes_constants import get_default_hermes_root
+        global_root = get_default_hermes_root()
+    except Exception:
+        return None
+    profile_home = get_hermes_home()
+    if _same_path(profile_home, global_root):
+        return None
+    return global_root / "auth.json"
+
+
 def _resolved_key(path: Path) -> str:
     """Canonical string for *path* (resolved when possible) used as a cache / lock-holder key."""
     try:
@@ -667,11 +685,24 @@ def _load_provider_state_with_source(
 ) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
     """Provider state plus the auth.json path it came from (``(None, None)`` when absent).
 
-    Every profile owns its credentials: a named profile never reads the root ``auth.json``
-    (#111724), so the source is always the active store. Refresh paths that rotate single-use
-    OAuth refresh tokens write the rotated chain back to that same path."""
+    Named profiles own most credentials (#111724). **xAI is the exception**: its
+    refresh token rotates on every use, so a copied ``providers.xai-oauth`` on a
+    profile revokes every other copy. A profile without its own xAI block
+    inherits the machine-root store; a present dict (even empty) still shadows.
+    """
     state = _provider_state_in(auth_store, provider_id)
-    return (state, _auth_file_path()) if state is not None else (None, None)
+    if state is not None:
+        return (state, _auth_file_path())
+    if provider_id == "xai-oauth":
+        global_path = _global_auth_file_path()
+        if global_path is not None:
+            try:
+                global_state = _provider_state_in(_load_auth_store(global_path), provider_id)
+            except Exception:
+                global_state = None
+            if global_state is not None:
+                return (global_state, global_path)
+    return (None, None)
 
 
 def _load_provider_state(auth_store: Dict[str, Any], provider_id: str) -> Optional[Dict[str, Any]]:
@@ -763,13 +794,27 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Return the persisted credential pool of the ACTIVE store, or one provider slice.
 
-    A named profile reads only its own ``auth.json``: credentials authenticated at the root are
-    not inherited (#111724) — ``hermes -p <name> auth add <provider>`` gives the profile its own."""
+    A named profile reads only its own ``auth.json`` for most providers (#111724).
+    An empty ``xai-oauth`` pool does not shadow: inherit the machine-root grant.
+    A non-empty profile pool still shadows (do not copy the same refresh token)."""
     pool = _load_auth_store().get("credential_pool")
     pool = pool if isinstance(pool, dict) else {}
     if provider_id is None:
         return dict(pool)
     entries = pool.get(provider_id)
+    if isinstance(entries, list) and (entries or provider_id != "xai-oauth"):
+        return list(entries)
+    if provider_id == "xai-oauth":
+        global_path = _global_auth_file_path()
+        if global_path is not None:
+            try:
+                global_pool = _load_auth_store(global_path).get("credential_pool")
+            except Exception:
+                global_pool = None
+            if isinstance(global_pool, dict):
+                inherited = global_pool.get(provider_id)
+                if isinstance(inherited, list):
+                    return list(inherited)
     return list(entries) if isinstance(entries, list) else []
 
 

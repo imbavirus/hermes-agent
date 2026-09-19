@@ -1,9 +1,9 @@
-"""Every profile owns its credentials.
+"""Every profile owns its credentials — except xAI's single-use refresh grant.
 
-A named profile (``HERMES_HOME`` under ``profiles/<name>``) resolves provider state and the
-credential pool from ITS OWN ``auth.json`` only. The root ``~/.hermes/auth.json`` is never a
-read fallback and never a write-through target (#111724): an isolated service profile must fail
-closed instead of acting — and rotating tokens — as the owner. Writes stay scoped to the profile.
+A named profile (``HERMES_HOME`` under ``profiles/<name>``) resolves most provider state from
+ITS OWN ``auth.json`` (#111724). xAI is the Infernos exception: copying that refresh token
+into a profile revokes every other copy (#43589 / #74339). Profiles without an own
+``providers.xai-oauth`` block inherit and write-through the machine-root store.
 """
 
 from __future__ import annotations
@@ -79,8 +79,9 @@ def test_named_profile_never_reads_the_root_store(profile_env):
     assert read_credential_pool("openai-codex") == []
     assert [e["id"] for e in read_credential_pool("openrouter")] == ["prof-1"]
     assert set(read_credential_pool()) == {"openrouter"}
-    with pytest.raises(AuthError):
-        _read_xai_oauth_tokens()
+    # xAI is the Infernos exception: single-use refresh cannot be copied per
+    # profile (#43589). A profile with no own block inherits the root grant.
+    assert _read_xai_oauth_tokens()["tokens"]["refresh_token"] == "xai-root-refresh"
     with pytest.raises(AuthError):
         resolve_codex_runtime_credentials(refresh_if_expiring=False)
 
@@ -115,14 +116,19 @@ def test_profile_refresh_never_writes_through_to_the_root_store(profile_env):
     _save_xai_oauth_tokens({"access_token": "xai-new", "refresh_token": "xai-new-rt"}, set_active=False)
     _save_codex_tokens({"access_token": "codex-new", "refresh_token": "codex-new-rt"})
     write_credential_pool("openrouter", [{"id": "prof-new", "auth_type": "api_key", "priority": 0,
-                                          "source": "manual", "access_token": "sk-profile-new"}])
+                                          "source": "manual", "access_token": "«redacted:sk-…»"}])
     assert clear_codex_pool_quota_cooldowns() == 0  # the root's exhausted row is not ours to clear
 
-    assert root_file.read_bytes() == before
+    root_after = json.loads(root_file.read_text())
     profile_store = json.loads((profile_env["profile"] / "auth.json").read_text())
-    assert profile_store["providers"]["xai-oauth"]["tokens"]["refresh_token"] == "xai-new-rt"
+    # xAI write-through: no shadowing profile block; root grant rotated in place.
+    assert root_after["providers"]["xai-oauth"]["tokens"]["refresh_token"] == "xai-new-rt"
+    assert "xai-oauth" not in profile_store.get("providers", {})
+    # Codex / pool stay #111724-isolated.
+    assert root_file.read_bytes() != before
     assert profile_store["providers"]["openai-codex"]["tokens"]["refresh_token"] == "codex-new-rt"
     assert [e["id"] for e in profile_store["credential_pool"]["openrouter"]] == ["prof-new"]
+    assert root_after["credential_pool"]["openai-codex"][0]["refresh_token"] == "root-codex-refresh"
 
 
 def test_malformed_or_missing_root_store_never_breaks_a_profile_read(profile_env):

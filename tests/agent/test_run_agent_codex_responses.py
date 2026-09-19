@@ -2458,6 +2458,53 @@ def test_consume_codex_stream_leaves_unindexed_reasoning_untouched():
     assert "".join(reasoning_streamed) == "Need to inspect files."
 
 
+def test_consume_codex_stream_drops_duplicate_reasoning_text_and_summary_deltas():
+    """xAI grok-4.6 streams the same visible thinking on both
+    response.reasoning_text.delta and response.reasoning_summary_text.delta
+    (docs.x.ai reasoning page prints both types as one stream). Live
+    callbacks must not concatenate the pair; persist still uses the final item.
+    """
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    reasoning_streamed = []
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.reasoning_text.delta", delta="I'll check the hair trait. "),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", delta="I'll check the hair trait. "),
+            SimpleNamespace(type="response.reasoning_text.delta", delta="Then boot Director."),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", delta="Then boot Director."),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+        ]),
+        model="grok-4.6",
+        on_reasoning_delta=reasoning_streamed.append,
+    )
+
+    assert "".join(reasoning_streamed) == "I'll check the hair trait. Then boot Director."
+
+
+def test_consume_codex_stream_drops_consecutive_duplicate_output_text_deltas():
+    """Same-chunk output_text.delta twice (proxy echo / dual subscribe) must
+    not double the live answer. Distinct chunks still concatenate."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    streamed = []
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.output_text.delta", delta="Let's get Cindy looking nice. "),
+            SimpleNamespace(type="response.output_text.delta", delta="Let's get Cindy looking nice. "),
+            SimpleNamespace(type="response.output_text.delta", delta="Then boot Director."),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+        ]),
+        model="grok-4.6",
+        on_text_delta=streamed.append,
+    )
+
+    assert "".join(streamed) == "Let's get Cindy looking nice. Then boot Director."
+    assert "Let's get Cindy looking nice. " in (getattr(response, "output_text", "") or "")
+
+
 def _codex_compaction_checkpoint_response(blob: str = "compaction_blob_1"):
     """A turn that returns ONLY a server-side native-compaction checkpoint.
 

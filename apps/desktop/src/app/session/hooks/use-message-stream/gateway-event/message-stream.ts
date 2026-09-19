@@ -87,7 +87,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       return true
     }
 
-    flushQueuedDeltas(sessionId)
+    flushQueuedDeltas(sessionId, { resetDedupe: true })
     pruneFinishedSessionSubagents(sessionId)
     setSessionCompacting(sessionId, false)
     compactedTurnRef.current.delete(sessionId)

@@ -20,6 +20,25 @@ import { watchRuntimePlugins } from './runtime-loader'
 
 const modules = import.meta.glob<{ default: HermesPlugin }>('../plugins/*/plugin.{js,ts,tsx}', { eager: true })
 
+/** When a folder ships both plugin.js and plugin.tsx, keep the typed entry.
+ *  Vite's `plugin.{js,ts,tsx}` glob would otherwise register the same id twice
+ *  (double Bot Mode, double gateway handlers, glued 2×/4× stream text). */
+export function preferTypedBundledPlugin(paths: string[]): string[] {
+  const rank = (path: string) => (path.endsWith('.tsx') ? 3 : path.endsWith('.ts') ? 2 : path.endsWith('.js') ? 1 : 0)
+  const chosen = new Map<string, string>()
+
+  for (const path of paths) {
+    const dir = path.replace(/\/plugin\.(js|ts|tsx)$/, '')
+    const prev = chosen.get(dir)
+
+    if (!prev || rank(path) > rank(prev)) {
+      chosen.set(dir, path)
+    }
+  }
+
+  return [...chosen.values()]
+}
+
 // One-shot init guard. Contributions themselves register by id (re-registering
 // is idempotent), but the disk-door watcher setup below (watchRuntimePlugins)
 // must NOT run twice — so discovery is guarded to a single pass, not re-run on
@@ -33,7 +52,13 @@ export function discoverBundledPlugins(): void {
 
   loaded = true
 
+  const allowed = new Set(preferTypedBundledPlugin(Object.keys(modules)))
+
   for (const [path, mod] of Object.entries(modules)) {
+    if (!allowed.has(path)) {
+      continue
+    }
+
     const plugin = mod.default
 
     if (!plugin?.id || typeof plugin.register !== 'function') {

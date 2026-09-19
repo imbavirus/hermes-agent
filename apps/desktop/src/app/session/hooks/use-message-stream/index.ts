@@ -211,6 +211,7 @@ export function useMessageStream({
   )
 
   const queuedDeltasRef = useRef<Map<string, QueuedStreamDelta[]>>(new Map())
+  const lastLiveChunkRef = useRef<Map<string, { assistant: string; reasoning: string }>>(new Map())
   const flushHandleRef = useRef<number | null>(null)
   const lastFlushAtRef = useRef<number>(0)
   // What the previous flush cost on the main thread — drives the adaptive
@@ -227,7 +228,15 @@ export function useMessageStream({
   const lastCwdInfoSessionRef = useRef<null | string>(null)
 
   const flushQueuedDeltas = useCallback(
-    (sessionId?: string) => {
+    (sessionId?: string, opts?: { resetDedupe?: boolean }) => {
+      if (opts?.resetDedupe) {
+        if (sessionId) {
+          lastLiveChunkRef.current.delete(sessionId)
+        } else {
+          lastLiveChunkRef.current.clear()
+        }
+      }
+
       const queue = queuedDeltasRef.current
       const ids = sessionId ? [sessionId] : [...queue.keys()]
 
@@ -356,6 +365,18 @@ export function useMessageStream({
       if (!delta) {
         return
       }
+
+      // Same-chunk echo: dual WS apply, or xAI firing reasoning_text +
+      // reasoning_summary with identical visible tokens. A model repeating a
+      // word sends one delta or "yes" + " yes" (leading space).
+      const last = lastLiveChunkRef.current.get(sessionId) ?? { assistant: '', reasoning: '' }
+
+      if (last[key] === delta) {
+        return
+      }
+
+      last[key] = delta
+      lastLiveChunkRef.current.set(sessionId, last)
 
       const queued = queuedDeltasRef.current.get(sessionId) ?? []
       const tail = queued.at(-1)

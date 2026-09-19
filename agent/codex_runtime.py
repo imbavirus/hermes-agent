@@ -613,9 +613,27 @@ class _CodexResponseAssembler:
         # first-observed (sequence, output_index) per announced item id so a later .done keeps its announced position.
         self.pending_function_calls: Dict[str, Dict[str, Any]] = {}
         self.announced_output_order: Dict[str, tuple] = {}
+        # Last live-emitted chunk per channel. xAI grok-4.6 (and some Responses
+        # proxies) fire the same visible thinking on both reasoning_text.delta
+        # and reasoning_summary_text.delta; concatenating both doubles every
+        # token in the UI while persist still stores the final item once.
+        # https://docs.x.ai/developers/model-capabilities/text/reasoning
+        self._last_live: Dict[str, str] = {}
 
     def _safe(self, cb: Callable | None, label: str, *args: Any) -> None:
         _call_guarded(cb, f"Codex stream {label} raised", args=args)
+
+    def _emit_live(self, kind: str, text: str, callback: Callable | None, label: str) -> None:
+        """Fire a live stream callback unless this exact chunk was just emitted.
+
+        Consecutive identical chunks are a wire echo (dual event types, or the
+        same SSE frame applied twice), not a model that said the same word
+        twice — those arrive as one delta or as ``"yes"`` + ``" yes"``.
+        """
+        if not text or callback is None or self._last_live.get(kind) == text:
+            return
+        self._last_live[kind] = text
+        self._safe(callback, label, text)
 
     def _on_item_added(self, event: Any, event_type: str) -> None:
         item = _event_field(event, "item")
@@ -648,9 +666,9 @@ class _CodexResponseAssembler:
             self.commentary_text_deltas.append(delta_text)
             # Legacy fallback when no first-class commentary consumer is installed.
             if self.on_commentary_message is None:
-                self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
+                self._emit_live("reasoning", delta_text, self.on_reasoning_delta, "on_reasoning_delta")
         elif self.active_message_phase == "analysis":
-            self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
+            self._emit_live("reasoning", delta_text, self.on_reasoning_delta, "on_reasoning_delta")
         else:
             self.text_deltas.append(delta_text)
             if self.has_tool_calls:
@@ -658,7 +676,7 @@ class _CodexResponseAssembler:
             if not self.first_delta_fired:
                 self.first_delta_fired = True
                 self._safe(self.on_first_delta, "on_first_delta")
-            self._safe(self.on_text_delta, "on_text_delta", delta_text)
+            self._emit_live("assistant", delta_text, self.on_text_delta, "on_text_delta")
 
     def _on_refusal_delta(self, event: Any, event_type: str) -> None:
         # ``response.refusal.delta``: the model declined and streams its explanation on the refusal
@@ -691,7 +709,7 @@ class _CodexResponseAssembler:
             if self.active_summary_index is not None and summary_index != self.active_summary_index:
                 reasoning_text = f"\n\n{reasoning_text}"
             self.active_summary_index = summary_index
-        self._safe(self.on_reasoning_delta, "on_reasoning_delta", reasoning_text)
+        self._emit_live("reasoning", reasoning_text, self.on_reasoning_delta, "on_reasoning_delta")
 
     def _on_item_done(self, event: Any, event_type: str) -> None:
         done_item = _event_field(event, "item")
