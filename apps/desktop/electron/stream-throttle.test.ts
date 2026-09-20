@@ -58,45 +58,41 @@ function makeWindow() {
   return win
 }
 
-test('registering a window applies the current throttle state immediately', () => {
+test('chat windows stay unthrottled even when idle — background agents keep running', () => {
   const timers = makeTimers()
   const throttle = createStreamThrottle(timers)
   const idle = makeWindow()
   throttle.register(idle)
 
-  // Idle default: throttling allowed.
-  assert.deepEqual(idle.calls, [true])
+  // Jarvis rule: an open chat is live whether it is focused or not.
+  // Chromium must never throttle timers, rAF, or WS keepalive.
+  assert.deepEqual(idle.calls, [false])
+  assert.equal(throttle.isUnthrottled(), true)
+})
+
+test('a late window also starts unthrottled; settling a turn never re-throttles', () => {
+  const timers = makeTimers()
+  const throttle = createStreamThrottle(timers)
+  const win = makeWindow()
+  throttle.register(win)
 
   throttle.update(true)
+  assert.deepEqual(win.calls, [false])
+  assert.equal(throttle.isUnthrottled(), true)
+
   const late = makeWindow()
   throttle.register(late)
-
-  // A window created mid-stream starts unthrottled.
   assert.deepEqual(late.calls, [false])
-})
 
-test('a turn in flight unthrottles every chat window; settling re-throttles after the trailing delay', () => {
-  const timers = makeTimers()
-  const throttle = createStreamThrottle(timers)
-  const win = makeWindow()
-  throttle.register(win)
-
-  throttle.update(true)
-  assert.deepEqual(win.calls, [true, false])
-  assert.equal(throttle.isUnthrottled(), true)
-
-  // Turn ends: not re-throttled synchronously — the tail flush needs full
-  // cadence — only after the trailing timer fires.
   throttle.update(false)
-  assert.deepEqual(win.calls, [true, false])
-  assert.equal(throttle.isUnthrottled(), true)
-
   timers.fire()
-  assert.deepEqual(win.calls, [true, false, true])
-  assert.equal(throttle.isUnthrottled(), false)
+  assert.deepEqual(win.calls, [false])
+  assert.deepEqual(late.calls, [false])
+  assert.equal(throttle.isUnthrottled(), true)
+  assert.equal(timers.pendingCount, 0)
 })
 
-test('a new turn during the trailing window cancels the pending re-throttle', () => {
+test('busy/idle reports never schedule a re-throttle timer', () => {
   const timers = makeTimers()
   const throttle = createStreamThrottle(timers)
   const win = makeWindow()
@@ -104,32 +100,11 @@ test('a new turn during the trailing window cancels the pending re-throttle', ()
 
   throttle.update(true)
   throttle.update(false)
-  assert.equal(timers.pendingCount, 1)
-
-  // Busy again before the delay elapses: stay unthrottled, timer cancelled.
   throttle.update(true)
+  throttle.update(false)
   assert.equal(timers.pendingCount, 0)
   assert.equal(throttle.isUnthrottled(), true)
-
-  // The cancelled timer firing late must be a no-op.
-  timers.fire()
-  assert.equal(throttle.isUnthrottled(), true)
-})
-
-test('repeated busy reports do not re-apply or stack timers', () => {
-  const timers = makeTimers()
-  const throttle = createStreamThrottle(timers)
-  const win = makeWindow()
-  throttle.register(win)
-
-  throttle.update(true)
-  throttle.update(true)
-  throttle.update(true)
-  assert.deepEqual(win.calls, [true, false])
-
-  throttle.update(false)
-  throttle.update(false)
-  assert.equal(timers.pendingCount, 1)
+  assert.deepEqual(win.calls, [false])
 })
 
 test('closed and destroyed windows drop out without throwing', () => {
@@ -147,6 +122,5 @@ test('closed and destroyed windows drop out without throwing', () => {
   throttle.register(gone)
 
   throttle.update(true)
-  // Only the registration-time call landed; nothing after close.
-  assert.deepEqual(closedWin.calls, [true])
+  assert.deepEqual(closedWin.calls, [false])
 })

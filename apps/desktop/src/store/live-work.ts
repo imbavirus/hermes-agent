@@ -10,9 +10,8 @@
  *
  * Compression is its own phase: `busy` can be false while the summarizer runs
  * (post-turn auto-compact, or a flicker between tool results and the next
- * API call). Leaving it out of this set re-throttles Chromium and drops the
- * gateway keep-set, so the continue after compact waits until that tab is
- * focused again.
+ * API call). Leaving it out of this set drops the gateway keep-set, so the
+ * continue after compact waits until that tab is focused again.
  */
 
 import { computed } from 'nanostores'

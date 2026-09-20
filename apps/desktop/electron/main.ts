@@ -718,24 +718,14 @@ if (IS_WINDOWS) {
 
 ipcMain.handle('hermes:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
 
-// Keep the renderer's PROCESS priority normal while its windows are hidden —
-// a deprioritized renderer streams a live answer visibly slower once the
-// window is minimized. This switch only affects scheduling priority; it does
-// not exempt timers from throttling and costs nothing at idle.
-//
-// The timer/rAF throttling story is deliberately NOT handled here anymore.
-// The old process-wide `disable-background-timer-throttling` /
-// `disable-backgrounding-occluded-windows` switches (plus a static
-// `backgroundThrottling: false` on every chat window) pinned every renderer's
-// `document.visibilityState` to 'visible' forever — which silently turned all
-// the renderer's visibility-gated backstop polls and clock ticks into
-// always-on timers. A completely idle, minimized Hermes burned ~20% CPU
-// around the clock. Throttling is now a runtime dial scoped to streaming:
-// see createStreamThrottle() — chat windows are unthrottled while any turn is
-// in flight (so a live answer keeps painting while blurred, occluded, or
-// minimized, exactly as before) and return to Chromium's default throttling
-// once the work settles.
+// Background chats stay live as if they are being viewed. Chromium's default
+// occluded-window / timer throttling lets keepalive pings miss, after which
+// the pool idle-reaper and LRU cap kill the backend and tabbing back dies on
+// session.resume. Process priority, timer throttling, and occluded-window
+// backgrounding are all off so WS, tools, and pool pings keep cadence.
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
@@ -14706,10 +14696,9 @@ function createWindow() {
     // material before the renderer paints the app theme. See createSessionWindow.
     show: false,
     // Shared with the secondary session windows (chatWindowWebPreferences);
-    // stream-aware throttling is applied per-window via streamThrottle so a
-    // live answer keeps painting while the window is blurred or minimized,
-    // without pinning visibilityState to 'visible' at idle. See
-    // session-windows.ts and stream-throttle.ts.
+    // streamThrottle unthrottles every chat window for its lifetime so
+    // background sessions keep running. See session-windows.ts and
+    // stream-throttle.ts.
     webPreferences: chatWindowWebPreferences(PRELOAD_PATH)
   })
 
@@ -17170,9 +17159,8 @@ ipcMain.handle('hermes:stopPreviewFileWatch', (_event, id) => stopPreviewFileWat
 // merged picture. Keyed by webContents id so a closed window stops counting.
 const activeWorkByWebContents = new Map<number, ActiveWork>()
 
-// The same merged picture drives background throttling: chat windows run
-// unthrottled while any turn is in flight (streaming must paint while hidden)
-// and fall back to Chromium's default throttling at idle. See stream-throttle.ts.
+// Active-work still feeds the quit guard. Chat windows stay unthrottled for
+// their lifetime so background sessions keep running. See stream-throttle.ts.
 const streamThrottle = createStreamThrottle()
 
 function updateStreamThrottleFromActiveWork() {

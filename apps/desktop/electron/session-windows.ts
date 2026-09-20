@@ -20,16 +20,13 @@ const SESSION_WINDOW_MIN_HEIGHT = 620
 // answer stalled until the window regained focus because one of them lost the
 // throttling opt-out).
 //
-// Background throttling is deliberately NOT set here. It is managed at runtime
-// by main.ts (`setBackgroundThrottling` driven by the merged `hermes:active-work`
-// reports): while any turn is in flight every chat window is unthrottled so the
-// transcript's bounded timer flush keeps painting while blurred, occluded, or
-// minimized — and once all turns finish, Chromium's default throttling returns
-// so an idle hidden window costs ~nothing. A static `backgroundThrottling:
-// false` here would pin `document.visibilityState` to 'visible' forever,
-// turning every visibility-gated poll in the renderer into an always-on timer
-// (the "Hermes idles at 20% CPU while minimized" bug). The preload path is
-// injected because it depends on the Electron entry's __dirname.
+// Background throttling is deliberately NOT set here as a webPreferences key.
+// main.ts registers every chat window with createStreamThrottle(), which
+// calls setBackgroundThrottling(false) for the life of the window so
+// background sessions keep WS keepalive, tools, and streaming cadence.
+// Process-wide Chromium switches in main.ts cover occluded-window timer
+// throttling. The preload path is injected because it depends on the
+// Electron entry's __dirname.
 //
 // `autoplayPolicy: 'no-user-gesture-required'` is load-bearing for voice:
 // Chromium's default autoplay policy suspends audio (HTMLAudioElement.play()
