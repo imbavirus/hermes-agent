@@ -81,11 +81,7 @@ function payloadFromJson(raw: unknown): DeepLinkPayload | null {
   return { kind, name, params }
 }
 
-function deliverFile(
-  filePath: string,
-  deliver: (payload: DeepLinkPayload) => void,
-  log: (msg: string) => void
-): void {
+function deliverFile(filePath: string, deliver: (payload: DeepLinkPayload) => void, log: (msg: string) => void): void {
   let text: string
 
   try {
@@ -102,6 +98,7 @@ function deliverFile(
     json = JSON.parse(text)
   } catch (err) {
     log(`[session-inbox] bad json ${path.basename(filePath)}: ${(err as Error).message}`)
+
     try {
       fs.unlinkSync(filePath)
     } catch {

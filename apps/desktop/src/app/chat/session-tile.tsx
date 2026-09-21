@@ -37,10 +37,10 @@ import { NEW_SESSION_TITLE, sessionTitle } from '@/lib/chat-runtime'
 import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
 import { createComposerAttachmentScope, draftTitleFor } from '@/store/composer'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import { sessionAwaitingInput } from '@/store/prompts'
-import { $liveWorkSessionIds } from '@/store/live-work'
 import {
   $gatewayState,
   $selectedStoredSessionId,
@@ -111,10 +111,7 @@ export function shouldAutoResumeSessionTile(args: {
  *  live runtime was bound, `session.reclaimed` / reconnect clears
  *  runtimeId — swapping the whole ChatView for the loader is the
  *  "page refresh" flash. Keep the parked transcript instead. */
-export function shouldShowSessionTileSpinner(args: {
-  parkedMessageCount: number
-  runtimeId?: string
-}): boolean {
+export function shouldShowSessionTileSpinner(args: { parkedMessageCount: number; runtimeId?: string }): boolean {
   if (args.runtimeId) {
     return false
   }
@@ -455,7 +452,17 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       .finally(() => {
         resumingRef.current = false
       })
-  }, [delegateRevision, focusedStoredSessionId, gatewayOpen, hasLiveWork, ownerRoute, runtimeId, storedSessionId, tile?.error, tile?.workspaceMode])
+  }, [
+    delegateRevision,
+    focusedStoredSessionId,
+    gatewayOpen,
+    hasLiveWork,
+    ownerRoute,
+    runtimeId,
+    storedSessionId,
+    tile?.error,
+    tile?.workspaceMode
+  ])
 
   // The gateway (re)opening invalidates any latched error — it likely came
   // from a not-yet-open gateway or the previous connection. Clearing it

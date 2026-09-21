@@ -686,6 +686,7 @@ export function clearIdleSessionStates(keepRuntimeIds: Iterable<string> = []): v
   for (const [runtimeId, state] of Object.entries(current)) {
     if (keep.has(runtimeId) || state.busy || state.needsInput || state.awaitingResponse) {
       next[runtimeId] = state
+
       continue
     }
 
@@ -1508,7 +1509,9 @@ export function resetTileRuntimeBindings(
   sessionTileDelegate()?.invalidateRuntimeBindings?.(preservedStoredIds)
 
   if (tiles.some(tile => tile.runtimeId && !preservedStoredIds.has(tile.storedSessionId))) {
-    $sessionTiles.set(tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : tileWithParkedTranscript(tile))))
+    $sessionTiles.set(
+      tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : tileWithParkedTranscript(tile)))
+    )
   }
 }
 
@@ -1529,9 +1532,7 @@ export function unbindTileRuntime(runtimeId: string) {
   if (tiles.some(t => t.runtimeId === runtimeId)) {
     $sessionTiles.set(
       tiles.map(t =>
-        t.runtimeId === runtimeId
-          ? { ...t, runtimeId: undefined, ...(parked ? { parkedMessages: parked } : {}) }
-          : t
+        t.runtimeId === runtimeId ? { ...t, runtimeId: undefined, ...(parked ? { parkedMessages: parked } : {}) } : t
       )
     )
   }
@@ -2169,7 +2170,10 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string): 
 
   if (moved) {
     delete tilesByProfile[from]
-    tilesByProfile[to] = [...(tilesByProfile[to] ?? []), ...moved.map(tile => ({ ...tile, ownerRoute: renamedOwner(tile.ownerRoute) }))]
+    tilesByProfile[to] = [
+      ...(tilesByProfile[to] ?? []),
+      ...moved.map(tile => ({ ...tile, ownerRoute: renamedOwner(tile.ownerRoute) }))
+    ]
   }
 
   const botTiles = tilesByProfile[BOTS_TILE_BUCKET]

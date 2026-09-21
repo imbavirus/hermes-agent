@@ -297,6 +297,7 @@ describe('useSessionStateCache — tab-back paints background transcript', () =>
 
     function PaintHarness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessProps) {
       const busyRef: MutableRefObject<boolean> = { current: false }
+
       const cache = useSessionStateCache({
         activeSessionId,
         busyRef,
@@ -305,35 +306,26 @@ describe('useSessionStateCache — tab-back paints background transcript', () =>
         setBusy: () => undefined,
         setMessages
       })
+
       onReady(cache)
+
       return null
     }
 
     let cache!: Cache
+
     const { rerender } = render(
-      <PaintHarness
-        activeSessionId="fg-runtime"
-        onReady={c => (cache = c)}
-        selectedStoredSessionId="fg-stored"
-      />
+      <PaintHarness activeSessionId="fg-runtime" onReady={c => (cache = c)} selectedStoredSessionId="fg-stored" />
     )
 
     act(() => {
-      cache.updateSessionState(
-        'bg-runtime',
-        state => ({ ...state, busy: false, messages: [reply] }),
-        'bg-stored'
-      )
+      cache.updateSessionState('bg-runtime', state => ({ ...state, busy: false, messages: [reply] }), 'bg-stored')
     })
 
     expect($messages.get()).not.toEqual([reply])
 
     rerender(
-      <PaintHarness
-        activeSessionId="bg-runtime"
-        onReady={c => (cache = c)}
-        selectedStoredSessionId="bg-stored"
-      />
+      <PaintHarness activeSessionId="bg-runtime" onReady={c => (cache = c)} selectedStoredSessionId="bg-stored" />
     )
 
     expect($messages.get()).toEqual([reply])

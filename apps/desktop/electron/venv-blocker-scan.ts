@@ -261,10 +261,7 @@ export async function stopHermesRuntimeBlockers(
   const failed: number[] = []
 
   for (const process of result.processes) {
-    if (
-      (process.kind !== 'hermes-runtime' && process.kind !== 'pack-debris') ||
-      !process.safeToStop
-    ) {
+    if ((process.kind !== 'hermes-runtime' && process.kind !== 'pack-debris') || !process.safeToStop) {
       continue
     }
 
@@ -421,6 +418,7 @@ export async function listShimHolderPids(
       timeout: 8_000,
       windowsHide: true
     } as any)
+
     const parsed = JSON.parse(String((proc as any).stdout ?? ''))
 
     if (!parsed || parsed.ok !== true || !Array.isArray(parsed.pids)) {

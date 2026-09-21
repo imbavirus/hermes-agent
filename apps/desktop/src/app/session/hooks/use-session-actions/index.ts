@@ -50,9 +50,9 @@ import {
   ensureGatewayAgent,
   ensureGatewayProfile,
   isLegacyNewChatProfile,
+  mintingOwnerRouteForNewChat,
   normalizeProfileKey,
-  resolveNewChatOwnerRoute,
-  mintingOwnerRouteForNewChat
+  resolveNewChatOwnerRoute
 } from '@/store/profile'
 import { $projectScope, resolveNewSessionCwd } from '@/store/projects'
 import { receiveApprovalRequest, replayPendingApproval } from '@/store/prompts'
@@ -318,7 +318,10 @@ async function desktopSessionCreateParams(
   }
 
   const profile =
-    capturedRoute?.profile || requestedProfile || $newChatProfile.get() || normalizeProfileKey($activeGatewayProfile.get())
+    capturedRoute?.profile ||
+    requestedProfile ||
+    $newChatProfile.get() ||
+    normalizeProfileKey($activeGatewayProfile.get())
 
   if (capturedRoute) {
     await ensureGatewayAgent(capturedRoute.connectionId, profile)
@@ -709,7 +712,15 @@ export function useSessionActions({
           // server later returns its own preview/title and supersedes this.
           // The row carries the create route's exact owner (backend profile +
           // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, mintingOwnerRouteForNewChat(capturedRoute))
+          upsertOptimisticSession(
+            created,
+            stored,
+            null,
+            preview?.trim() || null,
+            null,
+            undefined,
+            mintingOwnerRouteForNewChat(capturedRoute)
+          )
           // Anything still parked under the pre-session draft bucket belongs
           // to this chat now (#114122); the composer moves it on scope swap.
           announceNewSessionDraftKey(stored)
@@ -807,15 +818,17 @@ export function useSessionActions({
         // to fall through into the last project folder while main chat was
         // occupied (openTab path for "New session in Home").
         const explicitTarget =
-          options?.profile !== undefined || options?.cwd !== undefined || options?.workspaceScope?.ownerRoute !== undefined
+          options?.profile !== undefined ||
+          options?.cwd !== undefined ||
+          options?.workspaceScope?.ownerRoute !== undefined
 
         const defaultTarget = options?.route === undefined && !explicitTarget ? defaultNewSessionTarget() : null
 
         const capturedRoute =
           options?.route !== undefined
             ? options.route
-            : options?.workspaceScope?.ownerRoute ??
-              (defaultTarget ? defaultTarget.route : resolveNewChatOwnerRoute(options?.profile))
+            : (options?.workspaceScope?.ownerRoute ??
+              (defaultTarget ? defaultTarget.route : resolveNewChatOwnerRoute(options?.profile)))
 
         // A named local profile uses the legacy profile-only transport (no
         // connectionId). Tab-strip "+" omits `options.profile`; the draft or
@@ -899,6 +912,7 @@ export function useSessionActions({
             // moment on, including ambient creates (no capturedRoute).
             setSessionOwnerHint(stored, mintingRoute)
             holdSessionOwnerUntilForeground(stored, mintingRoute)
+
             if (legacyOwnerProfile) {
               // The tile below persists this bare owner as the stored-id hint;
               // bridge the create-to-mount gap with the same profile pool.
@@ -934,7 +948,15 @@ export function useSessionActions({
         // immediate session.resume fails closed on multi-profile installs
         // (#102792).
         if (listed) {
-          upsertOptimisticSession(created, stored, null, null, null, undefined, mintingOwnerRouteForNewChat(capturedRoute))
+          upsertOptimisticSession(
+            created,
+            stored,
+            null,
+            null,
+            null,
+            undefined,
+            mintingOwnerRouteForNewChat(capturedRoute)
+          )
         } else {
           upsertUnlistedSessionOwner(created, stored, capturedRoute)
         }
@@ -954,10 +976,17 @@ export function useSessionActions({
         // patchSessionTile races the resume effect: the tile mounts with no
         // runtimeId, fail-closed session.resume fires (no owner on an unlisted
         // draft), and "+" paints "Couldn't open this session".
-        openSessionTile(stored, dir, undefined, undefined, {
-          ...workspaceScope,
-          ownerRoute: workspaceScope.ownerRoute ?? mintingRoute
-        }, { ownerRoute: workspaceScope.ownerRoute ?? mintingRoute, runtimeId: created.session_id })
+        openSessionTile(
+          stored,
+          dir,
+          undefined,
+          undefined,
+          {
+            ...workspaceScope,
+            ownerRoute: workspaceScope.ownerRoute ?? mintingRoute
+          },
+          { ownerRoute: workspaceScope.ownerRoute ?? mintingRoute, runtimeId: created.session_id }
+        )
 
         if (dir === 'center' && runtimeInfo?.cwd) {
           setCurrentCwdTransient(runtimeInfo.cwd)
