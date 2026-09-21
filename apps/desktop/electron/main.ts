@@ -4235,6 +4235,9 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
           `[updates] stopped hermes-runtime holders: stopped=${stopResult.stopped.join(',') || 'none'} failed=${stopResult.failed.join(',') || 'none'}`
         )
         await new Promise(resolve => setTimeout(resolve, 500))
+      }
+    }
+
     if (IS_WINDOWS && resolveUpdateScriptHandoff(updateRoot)) {
       const message = windowsUpdatePrerequisiteError(updateRoot)
 
