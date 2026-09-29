@@ -13,6 +13,11 @@ import { translateNow } from '@/i18n'
 import { desktopDefaultCwd } from '@/lib/desktop-fs'
 import { decideLivenessForceClose, LIVENESS_REPROBE_DELAY_MS, shouldNudgeReconnectOnFocus } from '@/lib/gateway-liveness-policy'
 import { BACKEND_BOOT_WAIT_TIMEOUT_MS, RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
+// RpcEvent now lives in @hermes/shared; the SDK re-exports it under this name.
+// Importing it from '@/types/hermes' resolved to nothing, so the boot hook's
+// event handler was typed against a type that no longer existed — a load-time
+// hazard on the boot path itself.
+import type { RpcEvent } from '@/sdk'
 import {
   $desktopBoot,
   applyDesktopBootProgress,
@@ -48,6 +53,7 @@ import {
   isCurrentGatewaySwitch,
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
+import { $liveWorkSessionIds } from '@/store/live-work'
 import { notify, notifyError } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -68,7 +74,6 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
-import { $liveWorkSessionIds } from '@/store/live-work'
 import {
   $sessionOwnerHoldRevision,
   $sessionTiles,
@@ -80,7 +85,6 @@ import {
   resetTileRuntimeBindings
 } from '@/store/session-states'
 import { windowProfileOverride } from '@/store/windows'
-import type { RpcEvent } from '@/types/hermes'
 
 import { stashGatewaySurvivor, survivorIsStale, takeGatewaySurvivor } from './gateway-hmr-survivor'
 
