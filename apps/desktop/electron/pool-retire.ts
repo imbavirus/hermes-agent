@@ -16,7 +16,16 @@ export interface PoolRetirerDeps<E extends PoolRetireEntry> {
   stopBackend: (key: string) => Promise<void>
   onRetiring?: (key: string) => void
   log?: (message: string) => void
+  /**
+   * Idle floor a backend must clear before capacity pressure may retire it.
+   * Mirrors the LRU path: being least-recently-*used* is not the same as being
+   * idle, and only the backend knows whether it is still working.
+   */
+  reclaimFreshMs?: number
 }
+
+/** Default floor for capacity reclaim, matching the LRU path's keepalive freshness. */
+const RECLAIM_FRESH_MS = 4 * 60_000
 
 export function selectRetirementCandidates<K, E extends PoolRetireEntry>(
   entries: Iterable<[K, E]>,
@@ -93,6 +102,16 @@ export function createPoolRetirer<E extends PoolRetireEntry>(deps: PoolRetirerDe
   }
 
   async function reclaim(): Promise<void> {
+    // Capacity pressure is not proof of idleness. `activeTurn` is a renderer
+    // lease: cron, async delegation, background processes and compaction all
+    // report it false while genuinely working, so a recently-pinged backend can
+    // still be busy. Without an idle floor here, one queued foreground spawn
+    // retires a backend that was touched seconds ago — the "background chat
+    // died while I was in another profile" failure. Require the same
+    // freshness the LRU path already requires.
+    const freshMs = deps.reclaimFreshMs ?? RECLAIM_FRESH_MS
+    const isIdle = (entry: E) => Date.now() - (entry.lastActiveAt || 0) > freshMs
+
     while (needsCapacity()) {
       let retired = false
       const candidates = selectRetirementCandidates(deps.pool, deps.coordinator.foregroundWaiters)
@@ -102,7 +121,7 @@ export function createPoolRetirer<E extends PoolRetireEntry>(deps: PoolRetirerDe
           return
         }
 
-        if (await retire(key, entry, needsCapacity)) {
+        if (await retire(key, entry, () => needsCapacity() && isIdle(entry))) {
           retired = true
 
           break
@@ -138,6 +157,8 @@ export function createPoolRetirer<E extends PoolRetireEntry>(deps: PoolRetirerDe
 
   return {
     wake,
+    // Deterministic entry point for tests; `wake` is the timer-driven path.
+    reclaimNow: () => enqueue(reclaim),
     assertCanOpen: (key: string, priority: 'foreground' | 'background') => {
       if (priority === 'foreground') {
         retiredScopes.delete(key)
