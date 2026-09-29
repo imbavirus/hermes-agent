@@ -3,6 +3,8 @@
 import asyncio
 import os
 import signal
+import tempfile
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -67,6 +69,64 @@ class TestStdioPidTracking:
         # All elements should be ints
         for pid in result:
             assert isinstance(pid, int)
+
+    def test_snapshot_sees_grandchild_spawned_by_a_venv_stub(self):
+        """A venv `Scripts\\python.exe` is a re-exec stub: the interpreter that
+        actually serves the MCP transport is its *child*. psutil's children()
+        defaults to recursive=False, so that grandchild was invisible — the
+        snapshot delta recorded only the stub, leaving the live interpreter in
+        no ledger, where shutdown and the orphan sweep can never reach it.
+        Measured on Windows: 45 untracked interpreters at one snapshot."""
+        import os
+        import subprocess
+        import sys
+        import time
+
+        from tools.mcp_tool_lifecycle import _snapshot_child_pids
+
+        # Real three-level chain: us -> stub -> leaf. `leaf` is the analogue of
+        # the hidden base interpreter, and it must be a genuine GRANDchild —
+        # a sibling would be visible to both recursive and non-recursive reads
+        # and would not test the defect at all.
+        holder = tempfile.TemporaryDirectory()
+        try:
+            leaf_path = Path(holder.name) / "leaf_pid"
+
+            stub = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import subprocess, sys, time;"
+                 "leaf = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']);"
+                 f"open({str(leaf_path)!r}, 'w').write(str(leaf.pid));"
+                 "time.sleep(30)"],
+            )
+
+            # Wait for the stub to report the pid it actually spawned.
+            leaf_pid = None
+            for _ in range(100):
+                if leaf_path.exists():
+                    try:
+                        leaf_pid = int(leaf_path.read_text().strip())
+                        break
+                    except ValueError:
+                        pass
+                time.sleep(0.1)
+
+            assert leaf_pid, "the stub never reported its child pid"
+
+            pids = _snapshot_child_pids()
+            # The direct child is visible either way; the grandchild is the
+            # whole point, and is the one that was previously unreapable.
+            assert stub.pid in pids, "the direct child must still be tracked"
+            assert leaf_pid in pids, (
+                "the grandchild interpreter must be tracked, or it can never be reaped"
+            )
+        finally:
+            holder.cleanup()
+            for proc in locals().get("stub") and [locals()["stub"]] or []:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
 
     def test_snapshot_sees_child_spawned_from_another_thread(self):
         """/proc/<pid>/task/<tid>/children is per-thread; the MCP subprocess

@@ -262,49 +262,50 @@ export function preserveLocalAssistantErrors(
       .map(message => [message.id, { ...message, pending: false } as ChatMessage])
   )
 
-  // Splice preserved rows back at the position they occupy in the local cache.
+  // Splice preserved rows back at their cached position.
   //
   // Appending them to the end (the previous behaviour) is what made an
   // interrupted turn jump. Such a turn has no completed assistant reply, so it is
-  // never present in the hydrated list and is preserved from the cache instead;
+  // never in the hydrated list and is preserved from the local cache instead;
   // once appended it rendered after every later message, and because the backward
   // probe also preserves the *preceding* user turn, the transcript showed two user
   // bubbles with the newer one on top — the reverse of stored order.
   //
-  // For each preserved row, find the next cached row that survived hydration and
-  // insert immediately before it. That neighbour is stable across runs, so the
-  // row lands where it was written rather than at the end.
-  const nextKnownIndex = new Map<string, number>()
-
-  for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
-    const message = currentMessages[index]
-
-    if (preservedById.has(message.id) || !mergedNextMessages.some(row => row.id === message.id)) {
-      nextKnownIndex.set(message.id, index)
-    }
-  }
-
-  const result: ChatMessage[] = []
-  const emitted = new Set<string>()
+  // The anchor must be a row that survived hydration with the SAME id. An
+  // optimistic local user message is frequently replaced by a stored row with a
+  // different id but identical text, so there is nothing to anchor to: in that
+  // case the preserved pair genuinely belongs at the tail, which is what the
+  // original append produced and what those cases assert.
   const currentIndexById = new Map(currentMessages.map((message, index) => [message.id, index]))
+  const currentIdByIndex = currentMessages.map(message => message.id)
+
+  // Emit a preserved row at the first hydrated row that FOLLOWS it in the
+  // cached order. A preserved row with no such following row is unanchored and
+  // goes to the tail.
+  const placed = new Set<string>()
+  const result: ChatMessage[] = []
 
   for (const message of mergedNextMessages) {
-    // Any preserved row that sorts before this message is emitted first.
-    const anchor = currentIndexById.get(message.id) ?? Number.MAX_SAFE_INTEGER
+    const anchor = currentIndexById.get(message.id)
 
-    for (const [id, index] of nextKnownIndex) {
-      if (index < anchor && preservedById.has(id) && !emitted.has(id)) {
-        emitted.add(id)
-        result.push(preservedById.get(id)!)
+    if (anchor !== undefined) {
+      for (let index = 0; index < anchor; index += 1) {
+        const candidateId = currentIdByIndex[index]
+
+        if (preservedById.has(candidateId) && !placed.has(candidateId)) {
+          placed.add(candidateId)
+          result.push(preservedById.get(candidateId)!)
+        }
       }
     }
 
     result.push(message)
   }
 
-  // Preserved rows with no surviving neighbour at all still belong at the end.
+  // Unanchored preserved rows (no hydrated row follows them) keep the original
+  // tail behaviour, which is what the optimistic-id-replacement cases assert.
   for (const [id, message] of preservedById) {
-    if (!emitted.has(id)) {
+    if (!placed.has(id)) {
       result.push(message)
     }
   }

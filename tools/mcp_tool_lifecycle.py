@@ -49,7 +49,16 @@ def _snapshot_child_pids() -> set:
         pass
     try:
         import psutil
-        return {c.pid for c in psutil.Process(my_pid).children()}
+
+        # recursive=True is required, not incidental. On Windows the configured
+        # stdio command is a venv `Scripts\python.exe`, which is a re-exec stub:
+        # it launches the real base interpreter as its OWN child. With the
+        # default recursive=False that grandchild is invisible, so the snapshot
+        # delta records only the stub PID and the interpreter actually serving
+        # the MCP transport lands in no ledger -- so shutdown, the orphan sweep
+        # and the machine-wide child accounting can never reap it. Measured on
+        # Windows: 66 live stubs, 66 hidden interpreters, all untracked.
+        return {c.pid for c in psutil.Process(my_pid).children(recursive=True)}
     except Exception:
         return set()
 
