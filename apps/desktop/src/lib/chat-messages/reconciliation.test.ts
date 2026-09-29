@@ -57,3 +57,27 @@ it('reconciles only the represented failed tail, retaining its structured error 
   expect(merged.map(message => message.id)).toEqual(stored.map(message => message.id))
   expect(merged.at(-1)).toMatchObject({ error: failed.error, errorSurface: failed.errorSurface })
 })
+
+it('keeps an interrupted turn in place instead of hoisting it above newer messages', () => {
+  // Reproduces the real transcript, taken from profile `mia` session
+  // 20260929_011217_770935. The stored order is correct and interleaved; the
+  // interrupted turn (Operation interrupted) has no completed assistant reply,
+  // so it is preserved from the local cache and appended at the end — dragging
+  // the *older* user turn up with it. The rendered view then shows two user
+  // bubbles with the newer one on top.
+  const olderUser = row('u-38519', 'user', 'the whole time i was tabbed to themis now')
+  const olderReply = row('a-38520', 'assistant', "That's the keep-alive contract breaking.")
+  const interrupted = row('a-38523', 'assistant', 'Operation interrupted.', { error: 'interrupted' })
+  const newerUser = row('u-38524', 'user', 'also look at where my messages jump to')
+
+  const stored = [olderUser, olderReply, newerUser]
+  const local = [olderUser, olderReply, interrupted, newerUser]
+
+  const merged = preserveLocalAssistantErrors(stored, local)
+  const order = merged.filter(message => !message.hidden).map(message => message.id)
+
+  // The interrupted turn belongs where it was written, between the reply it
+  // followed and the user message that came after it.
+  expect(order).toEqual(['u-38519', 'a-38520', 'a-38523', 'u-38524'])
+  expect(merged.find(message => message.id === 'a-38523')).toMatchObject({ error: 'interrupted', pending: false })
+})

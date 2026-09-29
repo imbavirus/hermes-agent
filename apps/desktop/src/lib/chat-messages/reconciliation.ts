@@ -256,11 +256,60 @@ export function preserveLocalAssistantErrors(
     return mergedNextMessages
   }
 
-  const preserved = currentMessages
-    .filter(message => preserveIds.has(message.id))
-    .map(message => ({ ...message, pending: false }))
+  const preservedById = new Map(
+    currentMessages
+      .filter(message => preserveIds.has(message.id))
+      .map(message => [message.id, { ...message, pending: false } as ChatMessage])
+  )
 
-  return [...mergedNextMessages, ...preserved]
+  // Splice preserved rows back at the position they occupy in the local cache.
+  //
+  // Appending them to the end (the previous behaviour) is what made an
+  // interrupted turn jump. Such a turn has no completed assistant reply, so it is
+  // never present in the hydrated list and is preserved from the cache instead;
+  // once appended it rendered after every later message, and because the backward
+  // probe also preserves the *preceding* user turn, the transcript showed two user
+  // bubbles with the newer one on top — the reverse of stored order.
+  //
+  // For each preserved row, find the next cached row that survived hydration and
+  // insert immediately before it. That neighbour is stable across runs, so the
+  // row lands where it was written rather than at the end.
+  const nextKnownIndex = new Map<string, number>()
+
+  for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
+    const message = currentMessages[index]
+
+    if (preservedById.has(message.id) || !mergedNextMessages.some(row => row.id === message.id)) {
+      nextKnownIndex.set(message.id, index)
+    }
+  }
+
+  const result: ChatMessage[] = []
+  const emitted = new Set<string>()
+  const currentIndexById = new Map(currentMessages.map((message, index) => [message.id, index]))
+
+  for (const message of mergedNextMessages) {
+    // Any preserved row that sorts before this message is emitted first.
+    const anchor = currentIndexById.get(message.id) ?? Number.MAX_SAFE_INTEGER
+
+    for (const [id, index] of nextKnownIndex) {
+      if (index < anchor && preservedById.has(id) && !emitted.has(id)) {
+        emitted.add(id)
+        result.push(preservedById.get(id)!)
+      }
+    }
+
+    result.push(message)
+  }
+
+  // Preserved rows with no surviving neighbour at all still belong at the end.
+  for (const [id, message] of preservedById) {
+    if (!emitted.has(id)) {
+      result.push(message)
+    }
+  }
+
+  return result
 }
 
 export function branchGroupForUser(userMessage: ChatMessage): string {
