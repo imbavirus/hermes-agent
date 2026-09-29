@@ -54,6 +54,7 @@ import { isAuxiliaryWindow, isWatchWindow } from '@/store/windows'
 import { primaryRouteSelectedSessionId, routeSessionId } from '../routes'
 import { titlebarHeaderBaseClass, titlebarHeaderShadowClass, titlebarHeaderTitleClass } from '../shell/titlebar'
 
+import { shouldShowChatBar } from './chat-bar-visibility'
 import { ChatDropOverlay } from './chat-drop-overlay'
 import { ChatSwapOverlay, ChatSyncBadge } from './chat-swap-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
@@ -561,13 +562,32 @@ const ChatViewContent = memo(function ChatViewContent({
   // direct nav). Derived in render so the swap reads instantly: the same frame
   // the id changes we drop the old transcript and show the loader, instead of
   // waiting for the resume effect (which paints a frame later) to clear them.
+  // Clicking a chat in another profile: the route can already carry the new
+  // profile's session while `selectedSessionId` still holds the previous
+  // profile's. Equal ids mean "same conversation" only WITHIN one profile, so
+  // hand the two owners in — a bare id comparison reports "no mismatch" and
+  // leaves the old profile's transcript painted under the new selection.
+  // Resolved from the session owner hint (the same lookup the transcript is
+  // scoped by) so a cross-profile route blanks even before the resume lands.
+  const routedOwnerHint = routedSessionId ? getSessionOwnerHint(routedSessionId) : undefined
+  const routedOwnerProfile = routedOwnerHint?.targetProfile ?? routedOwnerHint?.profile
+
   const routeSessionMismatch = isPrimary
-    ? isRouteSessionMismatch(routedSessionId, selectedSessionId, sessions, {
-        activeRuntimeId: activeSessionId,
-        contextSwitching: Boolean(gatewaySwapTarget),
-        messagesEmpty,
-        transcriptStoredSessionId
-      })
+    ? isRouteSessionMismatch(
+        routedSessionId,
+        selectedSessionId,
+        sessions,
+        {
+          activeRuntimeId: activeSessionId,
+          contextSwitching: Boolean(gatewaySwapTarget),
+          messagesEmpty,
+          transcriptStoredSessionId
+        },
+        {
+          routedProfile: routedOwnerProfile,
+          selectedProfile: activeGatewayProfile
+        }
+      )
     : false
 
   // The compact new-session pop-out skips the wordmark/tagline intro — it's a
@@ -613,10 +633,17 @@ const ChatViewContent = memo(function ChatViewContent({
   })
 
   const threadLoading = threadLoadingState(loadingSession, busy, awaitingResponse, lastVisibleIsUser)
-  // Hide the composer in the exhausted error state too: there's no live runtime
-  // to send to until a retry rebinds one. Watch windows are pure spectators of a
-  // subagent run driven elsewhere — no composer, transcript is read-only.
-  const showChatBar = !loadingSession && !resumeExhausted && !isWatchWindow() && (!isRoutedSessionView || Boolean(activeSessionId))
+  // The stored transcript paints before session.resume binds a runtime. The
+  // bar has to be there as soon as that transcript is, or a hung resume
+  // leaves a chat you can read and cannot answer. Send rebinds the runtime.
+  const showChatBar = shouldShowChatBar({
+    activeSessionId,
+    messagesEmpty,
+    resumeExhausted,
+    routeSessionMismatch,
+    routedSessionView: isRoutedSessionView,
+    watchWindow: isWatchWindow()
+  })
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResult>({
