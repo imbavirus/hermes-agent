@@ -11329,16 +11329,30 @@ async function ensureBackend(profile, opts: { passive?: boolean; spawnPriority?:
   }
 
   assertNotPassiveSpawn(passive, key)
-  // The hard slot is released only after the evicted child exits. Wait for
-  // that teardown before entering the spawn queue; otherwise a successful
-  // LRU choice still leaves this wake racing the old child for 30 seconds.
-  await evictLruPoolBackends(poolMaxBackends() - 1)
+
+  // Claim the key BEFORE any await below.
+  //
+  // Publishing after `evictLruPoolBackends` left a check-then-act hole: that
+  // call yields for seconds (prepare/commit over HTTP, then taskkill with a 5s
+  // SIGTERM + 1s SIGKILL grace), so two concurrent callers for the same profile
+  // both read `undefined` at the pool lookup, both awaited, both spawned, and the
+  // second `backendPool.set` overwrote the first. The loser's child kept running
+  // while nothing in the pool referenced it, so stopPoolBackend could never reap
+  // it — a duplicate backend for one profile's HERMES_HOME, and the 90s
+  // port-announcement timeout.
+  //
+  // The reservation is published with a *deferred* connectionPromise, so a racing
+  // caller finds a real entry and awaits this same spawn rather than starting its
+  // own. The child is still only started after eviction finishes, which keeps the
+  // original "don't race the outgoing child for its port" ordering intact.
+  let settleSpawn!: (value: any) => void
+  let failSpawn!: (error: unknown) => void
 
   const entry = {
     process: null,
     port: null,
     token: null,
-    connectionPromise: null,
+    connectionPromise: null as Promise<any>,
     lastActiveAt: Date.now(),
     remoteBaseUrl: null,
     releaseLocalBackendSlot: null,
@@ -11347,17 +11361,43 @@ async function ensureBackend(profile, opts: { passive?: boolean; spawnPriority?:
     spawnPriority
   }
 
-  entry.connectionPromise = spawnPoolBackend(key, entry).catch(async error => {
-    // Land the failure in desktop.log: without this a spawn that dies before
-    // its child exists (guard rejection, runtime resolution) leaves no trace
-    // beyond renderer-side rejections users never see in a bundle.
-    logPoolSpawnFailure(`"${key}"`, error)
-
-    await teardownFailedLocalBackend(key, entry)
-    throw error
+  entry.connectionPromise = new Promise<any>((resolve, reject) => {
+    settleSpawn = resolve
+    failSpawn = reject
   })
+  // Nobody is required to await this deferred before eviction, so keep Node from
+  // reporting the failure as an unhandled rejection while we are still evicting.
+  entry.connectionPromise.catch(() => {})
   backendPool.set(key, entry)
+
+  try {
+    // The hard slot is released only after the evicted child exits. Wait for
+    // that teardown before the child can start binding; otherwise a successful
+    // LRU choice still leaves this wake racing the old child for 30 seconds.
+    await evictLruPoolBackends(poolMaxBackends() - 1)
+  } catch (error) {
+    if (backendPool.get(key) === entry) {
+      backendPool.delete(key)
+    }
+
+    failSpawn(error)
+
+    throw error
+  }
+
   startPoolIdleReaper()
+
+  void spawnPoolBackend(key, entry)
+    .catch(async error => {
+      // Land the failure in desktop.log: without this a spawn that dies before
+      // its child exists (guard rejection, runtime resolution) leaves no trace
+      // beyond renderer-side rejections users never see in a bundle.
+      logPoolSpawnFailure(`"${key}"`, error)
+
+      await teardownFailedLocalBackend(key, entry)
+      throw error
+    })
+    .then(settleSpawn, failSpawn)
 
   const connection = await entry.connectionPromise
   setWslBridgeProfileState(key, connection.mode !== 'remote')
