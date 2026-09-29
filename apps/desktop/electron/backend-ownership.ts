@@ -304,17 +304,29 @@ export function backendCommandMatches(command: unknown): boolean {
 /** Coordinates all quit paths so asynchronous backend teardown runs once. */
 export function createBackendShutdownCoordinator(teardown: () => Promise<void> | void) {
   let completion: Promise<void> | undefined
+  let settled = false
 
   return {
     run(): Promise<void> {
       if (!completion) {
         completion = Promise.resolve().then(teardown)
+        // Track settlement separately from `completion` existing: the quit
+        // barrier needs to distinguish "teardown in flight" from "already done",
+        // which `hasStarted()` alone cannot express.
+        void completion.then(
+          () => { settled = true },
+          () => { settled = true }
+        )
       }
 
       return completion
     },
     hasStarted(): boolean {
       return completion !== undefined
+    },
+    /** True once teardown has begun and has not yet finished. */
+    isPending(): boolean {
+      return completion !== undefined && !settled
     }
   }
 }
