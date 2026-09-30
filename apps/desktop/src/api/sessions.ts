@@ -39,6 +39,28 @@ function sessionScoped(scope?: ProfileScope): { connectionId?: string; profile?:
     return { ...scoped, connectionId: 'local' }
   }
 
+  // capabilityScoped() trims but does not DROP a string scope, so a blank one
+  // reaches here as a non-empty tag. More importantly it drops string scopes
+  // entirely, so a caller that resolved only the owning profile ("mia") produced
+  // an untagged read. On a multiplex gateway the default profile is not the
+  // owner, and /api/sessions/{id}/messages 404s without ?profile= — the
+  // transcript came back empty and the chat pane rendered blank with no error.
+  // Keep a NAMED string scope, and refuse a blank one.
+  if (typeof scope === 'string') {
+    const named = scope.trim()
+
+    // `scoped` may already carry a blank profile (capabilityScoped trims but
+    // does not drop an all-whitespace string), so a refused scope must clear
+    // the key rather than fall through with it.
+    if (!named) {
+      const { profile: _blank, ...rest } = scoped
+
+      return rest
+    }
+
+    return { ...scoped, profile: named }
+  }
+
   return scoped
 }
 

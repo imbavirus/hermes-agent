@@ -2468,7 +2468,17 @@ export function useSessionActions({
       // Same contract as branchStoredSession: the transcript read and the
       // branch RPC must both land on the backend that owns the parent, not on
       // whichever socket is active.
-      const ownerRoute = storedSessionId ? sessionOwnerRouteFromRow(cachedSessionRow(storedSessionId)) : undefined
+      //
+      // A bare profile string is NOT enough here. sessionScoped() drops a
+      // string scope, so `getAllSessionMessages(id, 'mia')` builds an UNTAGGED
+      // /api/sessions/{id}/messages and the backend 404s on a multiplex
+      // gateway, where the owning profile is not the default one - the
+      // transcript then hydrates to nothing and the pane is blank. Pair the
+      // resolved profile with the connection that served the list.
+      const ownerRoute = storedSessionId
+        ? sessionOwnerRouteFromRow(cachedSessionRow(storedSessionId)) ??
+          (profile ? { connectionId: 'local', profile, targetProfile: profile } : undefined)
+        : undefined
 
       if (storedSessionId) {
         try {
@@ -2547,7 +2557,11 @@ export function useSessionActions({
 
       // An exact owner from the parent row — connection AND profile. Undefined
       // for an untagged row, which keeps the ambient/profile-only path.
-      const ownerRoute = sessionOwnerRouteFromRow(stored)
+      // A listed row names its profile but carries no connection_id, so fall
+      // back to pairing the resolved profile with the local connection: a bare
+      // string scope is dropped by sessionScoped() and the read 404s on a
+      // multiplex gateway, aborting the branch as "nothing to branch".
+      const ownerRoute = sessionOwnerRouteFromRow(stored) ?? (profile ? { connectionId: 'local', profile, targetProfile: profile } : undefined)
 
       try {
         if (ownerRoute) {
