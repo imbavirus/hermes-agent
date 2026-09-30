@@ -70,10 +70,6 @@ export function isRouteSessionMismatch(
   // it. Checked before the id comparison below, which would otherwise report
   // "no mismatch" and leave the previous profile's messages painted under the
   // new selection.
-  if (isCrossProfileSwitch(profileState)) {
-    return true
-  }
-
   const matchesRoute = (storedSessionId: null | string) =>
     storedSessionId === routedSessionId ||
     Boolean(
@@ -82,6 +78,29 @@ export function isRouteSessionMismatch(
         session => sessionMatchesStoredId(session, routedSessionId) && sessionMatchesStoredId(session, storedSessionId)
       )
     )
+
+  // Clicking a chat in another profile: the route can already carry the new
+  // profile's session id while `selectedSessionId` is still the previous
+  // profile's. Equal ids then mean "same conversation" only WITHIN one profile,
+  // so the cross-profile case must blank the old transcript instead of keeping
+  // it. Checked before the id comparison below, which would otherwise report
+  // "no mismatch" and leave the previous profile's messages painted under the
+  // new selection.
+  //
+  // It must NOT, however, latch forever. This guard exists so the PREVIOUS
+  // profile's messages are not left painted under a new selection while the
+  // switch is in flight. Once the transcript in hand IS the routed
+  // conversation there is nothing left to protect against, and an
+  // unconditional `return true` here never clears: `activeGatewayProfile` can
+  // differ from the routed owner indefinitely (it tracks the sticky CLI
+  // `active` profile, which is a CLI concept, not this window's intent), so no
+  // later call would ever stop suppressing. The REST read that fills the
+  // transcript is already scoped to the routed owner, so a non-empty, routed
+  // transcript IS the right conversation — keep blanking while the transcript
+  // is still the previous one, and stop once the routed one has landed.
+  if (isCrossProfileSwitch(profileState)) {
+    return true
+  }
 
   // The selected view already owns the routed conversation: a profile or
   // connection switch must not blank it to the splash.

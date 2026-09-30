@@ -2,6 +2,8 @@ import { type MutableRefObject, useEffect, useRef } from 'react'
 
 import { isNewChatRoute } from '@/app/routes'
 import { type SessionResumeRequest, setResumeExhaustedSessionId } from '@/store/session'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import { getSessionOwnerHint } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import { markSelectionRestore } from '@/store/session-states'
 
@@ -113,6 +115,8 @@ export function useRouteResume({
   // enough to recover a boot race; repeating it would hot-loop against a backend
   // that legitimately keeps failing, which the bounded retry effect below owns.
   const strandedResumeAttemptRef = useRef<string | null>(null)
+  // `<sessionId>::<ownerProfile>` whose cross-profile adoption already happened.
+  const adoptedOwnerRef = useRef<string | null>(null)
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
@@ -127,6 +131,11 @@ export function useRouteResume({
     wasGatewayOpenRef.current = gatewayOpen
 
     if (currentView !== 'chat' || !gatewayOpen) {
+      console.error(
+        '[route-resume:probe] gated-out',
+        JSON.stringify({ currentView, gatewayState, gatewayOpen, pathnameChanged, routed: routedSessionId })
+      )
+
       return
     }
 
@@ -139,6 +148,36 @@ export function useRouteResume({
     // naming a session with no runtime ever bound, which `suppressMessages`
     // renders as a permanently blank pane with no chat bar.
     lastPathnameRef.current = locationPathname
+
+    // Adopt the routed session's owner profile as this window's active gateway
+    // profile.
+    //
+    // A multiplexed gateway serves every profile over one socket, so requests
+    // are scoped per-call by `profile` (the resume below already sends
+    // `sessionProfile: <owner>`) and `$activeGatewayProfile` is only the default
+    // scope a window falls back to. Clicking a session owned by another profile
+    // never went through `selectProfile` — that is wired only to the profile
+    // dropdown — so the window kept the profile it booted with (the sticky CLI
+    // `active` profile, e.g. `dev`) while the route named a `mia` session.
+    // `isRouteSessionMismatch` then saw a cross-profile route and suppressed a
+    // transcript it had already fetched successfully, and because
+    // `$activeGatewayProfile` never moved there was no transition that could
+    // ever clear the suppression: a permanently blank pane, no error logged.
+    // This is the missing state change. It is a plain atom write — no gateway
+    // swap — so it does not churn the backend or re-enter the resume below.
+    if (routedSessionId && !adoptedOwnerRef.current?.startsWith(`${routedSessionId}::`)) {
+      const ownerHint = getSessionOwnerHint(routedSessionId)
+      const ownerProfile = normalizeProfileKey(ownerHint?.targetProfile || ownerHint?.profile || '')
+
+      if (ownerProfile && ownerProfile !== normalizeProfileKey($activeGatewayProfile.get())) {
+        console.error(
+          '[route-resume:probe] adopt-owner',
+          JSON.stringify({ routed: routedSessionId, ownerProfile, before: $activeGatewayProfile.get() })
+        )
+        $activeGatewayProfile.set(ownerProfile)
+        adoptedOwnerRef.current = `${routedSessionId}::${ownerProfile}`
+      }
+    }
 
     if (routedSessionId) {
       const cachedRuntime = runtimeIdByStoredSessionIdRef.current.get(routedSessionId)
@@ -222,6 +261,20 @@ export function useRouteResume({
 
         const ownerRoute =
           sessionResumeRequest?.sessionId === routedSessionId ? sessionResumeRequest.ownerRoute : undefined
+
+        console.error(
+          '[route-resume:probe] dispatch',
+          JSON.stringify({
+            routed: routedSessionId,
+            alreadyActive,
+            pathnameChanged,
+            gatewayBecameOpen,
+            stuckOnRoutedSession,
+            strandedOnRoutedSession,
+            explicitlyRequested,
+            ownerRoute: ownerRoute ?? null
+          })
+        )
 
         if (ownerRoute) {
           void resumeSession(routedSessionId, true, ownerRoute)
