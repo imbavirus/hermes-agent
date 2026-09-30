@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 # omit ``iss`` from the redirect (#111135). Exact issuer match, nothing else is relaxed.
 _ISS_OMITTING_ISSUERS = frozenset({"https://api.figma.com"})
 
+# Authorization servers whose protected-resource metadata names the AS with a trailing slash
+# ("https://as.example/") while their own authorization-server metadata omits it
+# ("https://as.example"). The SDK compares the two by plain string equality (SEP-2468), so such a
+# server can never authenticate even though RFC 3986 §6.2.3 scheme-based normalization makes an
+# empty path and "/" one origin -- and the metadata was fetched from that same origin, so nothing
+# about the check's purpose (pin the issuer to the host that served the metadata) is given up.
+# Bare origins only: any real path difference still fails the SDK check.
+_TRAILING_SLASH_ISSUER_ORIGINS = frozenset({"https://zernio.com"})
+
 # Authorization-server metadata documents the SDK tries in its 401 branch (RFC 8414 / OIDC discovery).
 _ASM_DISCOVERY_PATHS = ("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration")
 _DISCOVERY_CONTEXT_LEAD = "Could not read authorization-server metadata"
@@ -64,6 +73,72 @@ def _with_discovery_context(exc: Exception, failures: list[str]):
     failure, since the 404 on the guessed ``/register`` URL is only its consequence (#113771)."""
     return type(exc)(f"{_DISCOVERY_CONTEXT_LEAD} ({'; '.join(failures)}); dynamic client registration "
                      f"then fell back to a guessed endpoint on the MCP host and failed: {exc}")
+
+
+def _metadata_document_issuer(response) -> str | None:
+    """The ``issuer`` an authorization-server metadata document advertises, or None when *response*
+    is not a readable 2xx metadata document (the SDK's own parsers stay the authority on validity).
+
+    Synchronous seam. An unread response is buffered first, since ``.json()`` on one raises
+    ResponseNotRead. An ASYNC-streamed response cannot be read from sync code, so it returns None
+    here -- :func:`_async_metadata_document_issuer` is the seam the SDK's transport actually uses.
+    """
+    status = getattr(response, "status_code", None)
+    if status is None or not 200 <= status < 300:
+        return None
+    if not getattr(response, "is_stream_consumed", True) and callable(getattr(response, "aread", None)):
+        return None  # async stream: readable only from the async seam
+    try:
+        if not getattr(response, "is_stream_consumed", True):
+            response.read()
+        data = response.json()
+    except Exception:
+        return None
+    issuer = data.get("issuer") if isinstance(data, dict) else None
+    return str(issuer) if issuer else None
+
+
+async def _async_metadata_document_issuer(response) -> str | None:
+    """Async twin of :func:`_metadata_document_issuer`.
+
+    The SDK drives the OAuth flow over an ASYNC streaming transport, so the metadata response
+    arrives unread and its body must be awaited before ``.json()`` parses. Returns the advertised
+    ``issuer``, or None when *response* is not a readable 2xx metadata document.
+    """
+    status = getattr(response, "status_code", None)
+    if status is None or not 200 <= status < 300:
+        return None
+    try:
+        if not getattr(response, "is_stream_consumed", True):
+            aread = getattr(response, "aread", None)
+            if callable(aread):
+                await aread()
+            else:
+                response.read()
+        data = response.json()
+    except Exception:
+        return None
+    issuer = data.get("issuer") if isinstance(data, dict) else None
+    return str(issuer) if issuer else None
+
+
+def reconcile_issuer_trailing_slash(expected: str | None, metadata_issuer: str | None) -> str | None:
+    """The issuer to validate against, after absorbing a known server's trailing-slash self-conflict.
+
+    Returns *metadata_issuer* when the two differ only by a trailing slash on an allowlisted origin
+    (so the SDK's string comparison sees one value), and *expected* untouched in every other case --
+    including a real path, host or scheme difference, which stays a hard failure.
+    """
+    if not expected or not metadata_issuer or expected == metadata_issuer:
+        return expected
+    if (expected.rstrip("/") or None) != (metadata_issuer.rstrip("/") or None):
+        return expected
+    if metadata_issuer.rstrip("/") not in _TRAILING_SLASH_ISSUER_ORIGINS:
+        return expected
+    logger.warning("MCP OAuth: authorization server advertises issuer %s but its protected-resource "
+                   "metadata names %s; treating them as the same origin for the known issuer %s",
+                   metadata_issuer, expected, metadata_issuer.rstrip("/"))
+    return metadata_issuer
 
 
 
@@ -149,6 +224,33 @@ class HermesProviderMixin:
     # _hermes_release_refresh_fence. Never shared across instances.
     _hermes_fence: int | None = None
 
+    async def _reconcile_issuer_from_metadata_response(self, response) -> None:
+        """Absorb a known server's trailing-slash issuer self-conflict before the SDK's SEP-2468
+        string comparison runs on the metadata we just handed it.
+
+        The SDK sets ``context.auth_server_url`` from the protected-resource metadata and then
+        asserts the authorization-server document's ``issuer`` equals it. zernio names itself
+        ``https://zernio.com/`` in one document and ``https://zernio.com`` in the other, so that
+        assertion can never hold. Re-pointing the expected issuer at the document's own value
+        (allowlisted origins only) makes the SDK check pass on its own terms; every other server
+        keeps the strict rule untouched.
+
+        Async because the SDK's transport hands over an UNREAD *async* streaming response: its
+        body has to be awaited (``aread``) before ``.json()`` will parse. Reading it synchronously
+        raises "Attempted to call a sync iterator on an async stream", and skipping the read raises
+        ResponseNotRead -- either way the issuer was never seen and this hook no-opped silently.
+        """
+        req = getattr(response, "request", None)
+        url = str(getattr(req, "url", "") or "")
+        if not any(path in url for path in _ASM_DISCOVERY_PATHS):
+            return
+        issuer = await _async_metadata_document_issuer(response)
+        if issuer is None:
+            return
+        reconciled = reconcile_issuer_trailing_slash(self.context.auth_server_url, issuer)
+        if reconciled != self.context.auth_server_url:
+            self.context.auth_server_url = reconciled
+
     async def async_auth_flow(self, request):
         """Guarantee fence release even if the auth generator is abandoned.
 
@@ -202,6 +304,7 @@ class HermesProviderMixin:
                     except BaseException as exc:
                         sent, thrown = None, exc
                     else:
+                        await self._reconcile_issuer_from_metadata_response(sent)
                         failure = _asm_discovery_failure(sent)
                         if failure:
                             discovery_failures.append(failure)

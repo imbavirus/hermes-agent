@@ -139,6 +139,11 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
                     break
                 if asm:
                     self.context.oauth_metadata = asm
+                    # Pre-flight seeds context.auth_server_url from the PRM exactly as the SDK's
+                    # 401 branch does, so a known server whose two documents disagree only by a
+                    # trailing slash would carry that conflict into the SDK's SEP-2468 comparison
+                    # later in the flow. Reconcile to the issuer the document actually advertises.
+                    await self._reconcile_issuer_from_metadata_response(resp)
                     storage = self._hermes_storage()  # persist now so a later cold-load skips discovery
                     if storage is not None:
                         storage.save_oauth_metadata(asm)
