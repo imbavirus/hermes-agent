@@ -238,6 +238,38 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
   return content
 }
 
+/**
+ * The durable `messages.id` as a number, or undefined when it is not one.
+ *
+ * The gateway resume path sends an integer `row_id`, but every REST transcript
+ * route (`/api/sessions/{id}/messages`, `/messages/around`, `/timeline`) runs
+ * rows through a JSON serialiser that renders the INTEGER id as a string
+ * ("38127"). A `typeof id === 'number'` guard therefore produced undefined for
+ * every windowed message, so history-window's
+ * `messages.find(m => m.rowId === rowId)` never matched, returned null, and the
+ * transcript rendered empty with no error anywhere. Accept a numeric string and
+ * reject only genuine non-integers.
+ */
+function numericRowId(value: number | string | undefined): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+
+    if (trimmed === '') {
+      return undefined
+    }
+
+    const parsed = Number(trimmed)
+
+    return Number.isInteger(parsed) ? parsed : undefined
+  }
+
+  return undefined
+}
+
 export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
   const result: ChatMessage[] = []
   let pendingToolParts: ChatMessagePart[] = []
@@ -429,9 +461,14 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     const reactions = messageReactions(message.display_metadata)
     // Gateway resume names the durable row id `row_id`; the REST transcript
-    // prefetch ships the same messages.id as a numeric `id`. Either one lets
-    // reactions address this exact row later.
-    const rowId = message.row_id ?? (typeof message.id === 'number' ? message.id : undefined)
+    // prefetch and the /messages/around + /timeline windowing endpoints ship
+    // the same durable id as `id`. SQLite ids are integers, but the REST
+    // serialiser renders them as JSON STRINGS ("38127"), so a typeof check
+    // alone left rowId undefined for every windowed message. That made
+    // history-window's `messages.find(m => m.rowId === rowId)` miss, return
+    // null, and paint an empty transcript with no error. Accept a numeric
+    // string, and reject only values that are not finite integers.
+    const rowId = message.row_id ?? numericRowId(message.id)
 
     result.push({
       id: `${message.timestamp || Date.now()}-${index}-${displayRole}`,

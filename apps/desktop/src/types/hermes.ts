@@ -621,9 +621,15 @@ export interface SessionMessage {
    *
    * The gateway resume path names it `row_id`; the REST transcript path
    * (`SELECT *`) ships the same value as a numeric `id`. Read both.
+   *
+   * The REST serialiser renders these as JSON STRINGS ("38127") even though the
+   * column is an INTEGER, so the declared type is widened: trusting `number`
+   * here is what let history-window's rowId lookup miss every message and paint
+   * an empty transcript without an error.
    */
   row_id?: number
-  id?: number
+  /** REST paths serialise the durable row id as a JSON string; the column is an INTEGER. */
+  id?: number | string
   text?: unknown
   timestamp?: number
   tool_call_id?: null | string
