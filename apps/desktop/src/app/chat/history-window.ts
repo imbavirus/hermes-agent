@@ -125,7 +125,19 @@ export function useHistoryWindow({ scopeKey, storedId, scope, isCurrent }: Histo
       setSelection({ lifetime: captured.lifetime, page: next })
 
       return target.id
-    } catch {
+    } catch (error) {
+      // A 404 here is NOT the benign "older backend" case the comment below
+      // describes: the window asks for `profile=<active gateway profile>` while
+      // the session is owned by another profile, the REST route 404s on that
+      // mismatch, and the transcript silently never paints. The pane stays
+      // blank with an empty console, which is exactly the bug this hides.
+      // Log it so the cause is visible in desktop.log instead of inferred.
+      console.error('[history-window] history window read failed', {
+        storedId,
+        rowId,
+        scope,
+        error: error instanceof Error ? error.message : String(error)
+      })
       // Missing/older backend, unreadable row, and failed reads preserve the
       // current page. The caller reports failure and can retry explicitly.
       return null

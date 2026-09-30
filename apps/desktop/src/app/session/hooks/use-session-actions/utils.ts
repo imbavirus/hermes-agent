@@ -1683,7 +1683,27 @@ export async function resolveSessionOwner(storedSessionId: null | string): Promi
 
   const row = await resolveStoredSession(storedSessionId)
 
-  return sessionOwnerRouteFromRow(row) ?? (row?.profile?.trim() || undefined)
+  const fromRow = sessionOwnerRouteFromRow(row)
+
+  if (fromRow) {
+    return fromRow
+  }
+
+  const rowProfile = row?.profile?.trim()
+
+  if (!rowProfile) {
+    return undefined
+  }
+
+  // A listed row names its owning `profile` but carries no `connection_id`, so
+  // sessionOwnerRouteFromRow bails and the hint is never recorded. The window
+  // then falls back to the ACTIVE gateway profile for the history request, and
+  // when the session belongs to a different profile the REST route 404s — the
+  // transcript silently never paints. Keep the row's own connection tag when it
+  // has one; a list served by the local pool is owned by 'local'.
+  const connectionId = (row?.connection_id ?? '').trim() || 'local'
+
+  return { connectionId, profile: rowProfile, targetProfile: rowProfile }
 }
 
 type SessionRuntimeStatePatch = Partial<
