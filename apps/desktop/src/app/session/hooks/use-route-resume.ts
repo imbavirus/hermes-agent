@@ -106,6 +106,13 @@ export function useRouteResume({
   // never touches this latch, so it can't spuriously trigger the reset).
   const prevResumeExhaustedRef = useRef<string | null>(null)
   const handledResumeRequestRef = useRef(0)
+  // Id we already dispatched a self-heal resume for. A route that names a
+  // session while nothing is bound to it is stranded: `suppressMessages` blanks
+  // the transcript and the chat bar never mounts, and with the pathname trigger
+  // committed early there is nothing left to wake it. One attempt per id is
+  // enough to recover a boot race; repeating it would hot-loop against a backend
+  // that legitimately keeps failing, which the bounded retry effect below owns.
+  const strandedResumeAttemptRef = useRef<string | null>(null)
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
@@ -116,13 +123,22 @@ export function useRouteResume({
     // already open is not mistaken for "became open" and does not double-resume with the
     // pathname-driven initial resume below.
     const gatewayBecameOpen = seenGatewayStateRef.current && !wasGatewayOpenRef.current && gatewayOpen
-    lastPathnameRef.current = locationPathname
     seenGatewayStateRef.current = true
     wasGatewayOpenRef.current = gatewayOpen
 
     if (currentView !== 'chat' || !gatewayOpen) {
       return
     }
+
+    // Commit the pathname only once this effect can actually act on the change.
+    // Committing it BEFORE the gate above (as this used to) burned the only
+    // navigation trigger on a run that could not act on it, and no later run
+    // could recover it: `gatewayBecameOpen` needs a closed->open edge that never
+    // arrives when the gateway was already open, and re-clicking the same
+    // session does not change the pathname at all. The result was a route
+    // naming a session with no runtime ever bound, which `suppressMessages`
+    // renders as a permanently blank pane with no chat bar.
+    lastPathnameRef.current = locationPathname
 
     if (routedSessionId) {
       const cachedRuntime = runtimeIdByStoredSessionIdRef.current.get(routedSessionId)
@@ -152,12 +168,30 @@ export function useRouteResume({
       // genuinely stranded on a routed session.
       const stuckOnRoutedSession = routedSessionId !== selectedStoredSessionIdRef.current && !freshDraftReady
 
+      // The route names a session and nothing is bound to it. Every other
+      // trigger is a transition that has already been observed (a pathname
+      // change, a reconnect, an explicit request); this one is a *state* — a
+      // boot race can leave it stranded with no transition left to observe, so
+      // the transcript stays blank forever. `freshDraftReady` keeps a genuine
+      // /:sid -> /new hand-off out, and the attempt latch keeps a genuinely
+      // failing backend from re-entering this on every render.
+      const strandedOnRoutedSession =
+        Boolean(routedSessionId) &&
+        !activeSessionIdRef.current &&
+        !freshDraftReady &&
+        !creatingSessionRef.current &&
+        strandedResumeAttemptRef.current !== routedSessionId
+
       // Resume when the route meaningfully changed, the gateway just opened, or
       // we're stranded on a routed session that never loaded. The first two
       // guard against a transient /:sid re-resume during "new chat" state clears
       // before the pathname updates from /:sid -> /.
       const shouldResume =
-        pathnameChanged || (gatewayBecameOpen && !freshDraftReady) || stuckOnRoutedSession || explicitlyRequested
+        pathnameChanged ||
+        (gatewayBecameOpen && !freshDraftReady) ||
+        stuckOnRoutedSession ||
+        strandedOnRoutedSession ||
+        explicitlyRequested
 
       // On a reconnect (gatewayBecameOpen) re-resume even when the route looks
       // `alreadyActive`: the cached runtime id can be stale once the gateway
@@ -179,6 +213,12 @@ export function useRouteResume({
         }
 
         bootResumeRef.current = false
+
+        // Arm the self-heal latch for this id before dispatching: the resume is
+        // async, so without this the effect re-enters on the renders in flight
+        // and fires the same stranded resume over and over. A successful resume
+        // binds a runtime, which clears the condition on its own.
+        strandedResumeAttemptRef.current = routedSessionId
 
         const ownerRoute =
           sessionResumeRequest?.sessionId === routedSessionId ? sessionResumeRequest.ownerRoute : undefined
