@@ -28,6 +28,7 @@ export const $liveWorkSessionIds = computed(
   [$workingSessionIds, $attentionSessionIds, $backgroundRunningSessionIds, $compactingSessions],
   (working, attention, background, compacting) => {
     const states = $sessionStates.get()
+
     const compactingStored = Object.keys(compacting)
       .filter(Boolean)
       .map(runtimeId => states[runtimeId]?.storedSessionId || runtimeId)

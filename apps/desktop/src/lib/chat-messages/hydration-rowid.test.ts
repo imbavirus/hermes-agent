@@ -28,6 +28,7 @@ describe('toChatMessages rowId from a REST-serialised transcript', () => {
   it('lets history-window find the anchor row the timeline asked for', () => {
     // The /timeline entry this mirrors is row_id 38127, preview "first prompt".
     const timelineEntry = { row_id: 38127 }
+
     const messages = toChatMessages([
       { id: '38127', role: 'user', content: 'first prompt', timestamp: 1790637138 }
     ] as never)
@@ -48,9 +49,7 @@ describe('toChatMessages rowId from a REST-serialised transcript', () => {
   })
 
   it('accepts a genuine numeric id unchanged', () => {
-    const messages = toChatMessages([
-      { id: 1234, role: 'user', content: 'numeric', timestamp: 1 }
-    ] as never)
+    const messages = toChatMessages([{ id: 1234, role: 'user', content: 'numeric', timestamp: 1 }] as never)
 
     expect(messages[0]?.rowId).toBe(1234)
   })

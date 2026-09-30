@@ -1,8 +1,8 @@
 import { type MutableRefObject, useEffect, useRef } from 'react'
 
 import { isNewChatRoute } from '@/app/routes'
-import { type SessionResumeRequest, setResumeExhaustedSessionId } from '@/store/session'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import { type SessionResumeRequest, setResumeExhaustedSessionId } from '@/store/session'
 import { getSessionOwnerHint } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import { markSelectionRestore } from '@/store/session-states'

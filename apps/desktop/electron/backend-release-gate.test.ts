@@ -177,6 +177,7 @@ describe('waitForBackendRelease (#74805 first-attempt race)', () => {
       isShimLocked: () => shimLocked,
       reapShimHolders: () => {
         reapCount += 1
+
         if (reapCount >= 2) {
           shimLocked = false
         }

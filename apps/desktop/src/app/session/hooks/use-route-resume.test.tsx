@@ -711,49 +711,49 @@ describe('useRouteResume bounded auto-retry after a failed resume', () => {
     }
 
     expect($resumeExhaustedSessionId.get()).toBeNull()
-    })
+  })
 
-    it('resumes a routed session whose route arrives before the chat view does', () => {
-      // The boot race. The old code committed `lastPathnameRef.current` BEFORE
-      // the `currentView !== 'chat'` return, so a first run that landed on a
-      // non-chat view consumed the only pathname trigger while unable to act on
-      // it. Nothing later recovers it: `gatewayBecameOpen` needs a
-      // closed->open edge that never comes when the gateway was already open,
-      // `stuckOnRoutedSession` is false because the restored selection already
-      // matches the route, and nothing requests an explicit resume. The route
-      // then names a session with no runtime ever bound, and `suppressMessages`
-      // renders a permanently blank pane with no chat bar.
-      const resumeSession = vi.fn(async () => undefined)
-      const activeSessionIdRef: MutableRefObject<null | string> = { current: null }
+  it('resumes a routed session whose route arrives before the chat view does', () => {
+    // The boot race. The old code committed `lastPathnameRef.current` BEFORE
+    // the `currentView !== 'chat'` return, so a first run that landed on a
+    // non-chat view consumed the only pathname trigger while unable to act on
+    // it. Nothing later recovers it: `gatewayBecameOpen` needs a
+    // closed->open edge that never comes when the gateway was already open,
+    // `stuckOnRoutedSession` is false because the restored selection already
+    // matches the route, and nothing requests an explicit resume. The route
+    // then names a session with no runtime ever bound, and `suppressMessages`
+    // renders a permanently blank pane with no chat bar.
+    const resumeSession = vi.fn(async () => undefined)
+    const activeSessionIdRef: MutableRefObject<null | string> = { current: null }
 
-      const props = {
-        activeSessionId: null,
-        activeSessionIdRef,
-        creatingSessionRef: { current: false },
-        currentView: 'settings',
-        freshDraftReady: false,
-        gatewayState: 'open',
-        locationPathname: '/session-1',
-        resumeSession,
-        routedSessionId: 'session-1',
-        runtimeIdByStoredSessionIdRef: { current: new Map<string, string>() },
-        selectedStoredSessionId: 'session-1',
-        selectedStoredSessionIdRef: { current: 'session-1' } as MutableRefObject<null | string>,
-        startFreshSessionDraft: vi.fn()
-      }
+    const props = {
+      activeSessionId: null,
+      activeSessionIdRef,
+      creatingSessionRef: { current: false },
+      currentView: 'settings',
+      freshDraftReady: false,
+      gatewayState: 'open',
+      locationPathname: '/session-1',
+      resumeSession,
+      routedSessionId: 'session-1',
+      runtimeIdByStoredSessionIdRef: { current: new Map<string, string>() },
+      selectedStoredSessionId: 'session-1',
+      selectedStoredSessionIdRef: { current: 'session-1' } as MutableRefObject<null | string>,
+      startFreshSessionDraft: vi.fn()
+    }
 
-      const { rerender } = render(<RouteResumeHarness {...props} />)
+    const { rerender } = render(<RouteResumeHarness {...props} />)
 
-      // Not the chat view yet, so nothing may be dispatched...
-      expect(resumeSession).not.toHaveBeenCalled()
+    // Not the chat view yet, so nothing may be dispatched...
+    expect(resumeSession).not.toHaveBeenCalled()
 
-      // ...and the trigger must survive to act once the chat view mounts.
-      rerender(<RouteResumeHarness {...props} currentView="chat" />)
+    // ...and the trigger must survive to act once the chat view mounts.
+    rerender(<RouteResumeHarness {...props} currentView="chat" />)
 
-      expect(resumeSession).toHaveBeenCalledWith('session-1', true)
-    })
+    expect(resumeSession).toHaveBeenCalledWith('session-1', true)
+  })
 
-    it('self-heals a stranded route once, then stops retrying', () => {
+  it('self-heals a stranded route once, then stops retrying', () => {
     // A route naming a session with nothing bound to it and no transition left
     // to observe. The self-heal must fire exactly once: a backend that keeps
     // failing must not turn this into a hot loop (the bounded retry effect

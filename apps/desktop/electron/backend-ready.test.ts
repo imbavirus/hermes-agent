@@ -123,12 +123,9 @@ test('rejects on a child error event', async () => {
 
 test('resolves from READY bytes already drained before the waiter attached', async () => {
   const child = makeFakeChild()
-  const p = waitForDashboardPort(
-    child,
-    1000,
-    () => '',
-    'noise\nHERMES_BACKEND_READY port=16939\n'
-  )
+
+  const p = waitForDashboardPort(child, 1000, () => '', 'noise\nHERMES_BACKEND_READY port=16939\n')
+
   assert.equal(await p, 16939)
 })
 
@@ -203,10 +200,12 @@ test('waitForDashboardReadyFile resolves if the file already exists', async () =
 
 test('waitForDashboardPortAnnouncement accepts a READY line already in initialText', async () => {
   const child = makeFakeChild()
+
   const p = waitForDashboardPortAnnouncement(child, {
     initialText: 'HERMES_BACKEND_READY port=22100\n',
     timeoutMs: 1000
   })
+
   assert.equal(await p, 22100)
 })
 

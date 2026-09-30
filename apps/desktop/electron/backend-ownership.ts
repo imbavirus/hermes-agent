@@ -314,8 +314,12 @@ export function createBackendShutdownCoordinator(teardown: () => Promise<void> |
         // barrier needs to distinguish "teardown in flight" from "already done",
         // which `hasStarted()` alone cannot express.
         void completion.then(
-          () => { settled = true },
-          () => { settled = true }
+          () => {
+            settled = true
+          },
+          () => {
+            settled = true
+          }
         )
       }
 

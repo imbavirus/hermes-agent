@@ -49,13 +49,16 @@ export interface PoolReservation<T> {
 }
 
 export class PoolSpawnReservations {
-  readonly #pendingByKey = new Map<string, {
-    promise: Promise<unknown>
-    resolve: (value: unknown) => void
-    reject: (error: unknown) => void
-    entry: unknown
-    published: boolean
-  }>()
+  readonly #pendingByKey = new Map<
+    string,
+    {
+      promise: Promise<unknown>
+      resolve: (value: unknown) => void
+      reject: (error: unknown) => void
+      entry: unknown
+      published: boolean
+    }
+  >()
 
   /** Whether a spawn for this key is reserved but not yet published. */
   isReserved(key: string): boolean {
@@ -129,8 +132,16 @@ export class PoolSpawnReservations {
     // Settle on both outcomes and always clear the reservation, so a failed
     // spawn is never cached as a permanent claim (fail closed, not latched).
     void promise.then(
-      () => { if (this.#pendingByKey.get(key) === record) { this.#pendingByKey.delete(key) } },
-      () => { if (this.#pendingByKey.get(key) === record) { this.#pendingByKey.delete(key) } }
+      () => {
+        if (this.#pendingByKey.get(key) === record) {
+          this.#pendingByKey.delete(key)
+        }
+      },
+      () => {
+        if (this.#pendingByKey.get(key) === record) {
+          this.#pendingByKey.delete(key)
+        }
+      }
     )
 
     const reservation: PoolReservation<T> = {

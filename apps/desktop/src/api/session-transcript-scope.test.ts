@@ -64,9 +64,7 @@ describe('session transcript reads keep a resolved string profile', () => {
 
     await getSessionMessages('stored-session')
 
-    expect(api).toHaveBeenLastCalledWith(
-      expect.objectContaining({ path: '/api/sessions/stored-session/messages' })
-    )
+    expect(api).toHaveBeenLastCalledWith(expect.objectContaining({ path: '/api/sessions/stored-session/messages' }))
     expect(String(api.mock.calls.at(-1)?.[0]?.path)).not.toContain('profile=')
   })
 

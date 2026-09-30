@@ -12,18 +12,21 @@ test('concurrent spawn requests for one key start exactly one child', async () =
   const pool = new Map<string, unknown>()
   let spawns = 0
 
-  const request = () => reservations.reserve(
-    'dev',
-    // Stands in for the spawn: the multi-second yield that let the second
-    // caller slip past the old check.
-    async () => {
-      spawns += 1
-      await new Promise(resolve => setTimeout(resolve, 20))
+  const request = () =>
+    reservations.reserve(
+      'dev',
+      // Stands in for the spawn: the multi-second yield that let the second
+      // caller slip past the old check.
+      async () => {
+        spawns += 1
+        await new Promise(resolve => setTimeout(resolve, 20))
 
-      return { process: {}, port: 1234 }
-    },
-    entry => { pool.set('dev', entry) }
-  )
+        return { process: {}, port: 1234 }
+      },
+      entry => {
+        pool.set('dev', entry)
+      }
+    )
 
   const a = request()
   const b = request()
@@ -44,16 +47,19 @@ test('every concurrent caller receives the owner result', async () => {
   const pool = new Map<string, unknown>()
   let spawns = 0
 
-  const run = () => reservations.reserve(
-    'mia',
-    async () => {
-      spawns += 1
-      await new Promise(resolve => setTimeout(resolve, 10))
+  const run = () =>
+    reservations.reserve(
+      'mia',
+      async () => {
+        spawns += 1
+        await new Promise(resolve => setTimeout(resolve, 10))
 
-      return { port: 5555 }
-    },
-    entry => { pool.set('mia', entry) }
-  ).settled
+        return { port: 5555 }
+      },
+      entry => {
+        pool.set('mia', entry)
+      }
+    ).settled
 
   const results = await Promise.all([run(), run(), run(), run()])
 
@@ -66,20 +72,23 @@ test('a failed spawn does not latch — the next request runs fresh', async () =
   const pool = new Map<string, unknown>()
   let attempts = 0
 
-  const run = (shouldFail: boolean) => reservations.reserve(
-    'themis',
-    async () => {
-      attempts += 1
-      await Promise.resolve()
+  const run = (shouldFail: boolean) =>
+    reservations.reserve(
+      'themis',
+      async () => {
+        attempts += 1
+        await Promise.resolve()
 
-      if (shouldFail) {
-        throw new Error('port announcement timed out')
+        if (shouldFail) {
+          throw new Error('port announcement timed out')
+        }
+
+        return { port: 1 }
+      },
+      entry => {
+        pool.set('themis', entry)
       }
-
-      return { port: 1 }
-    },
-    entry => { pool.set('themis', entry) }
-  ).settled
+    ).settled
 
   await assert.rejects(run(true), /port announcement timed out/)
   assert.equal(reservations.isReserved('themis'), false, 'a failed spawn must release the key')
@@ -96,13 +105,26 @@ test('a joiner can never mutate the pool', async () => {
 
   const first = reservations.reserve(
     'dev',
-    async () => { spawns += 1; return { port: 1 } },
-    entry => { pool.set('dev', entry) }
+    async () => {
+      spawns += 1
+
+      return { port: 1 }
+    },
+    entry => {
+      pool.set('dev', entry)
+    }
   )
+
   const second = reservations.reserve(
     'dev',
-    async () => { spawns += 1; return { port: 2 } },
-    entry => { pool.set('dev', entry) }
+    async () => {
+      spawns += 1
+
+      return { port: 2 }
+    },
+    entry => {
+      pool.set('dev', entry)
+    }
   )
 
   assert.equal(second.isOwner, false)
@@ -120,16 +142,19 @@ test('different keys do not block each other', async () => {
   const pool = new Map<string, unknown>()
   let spawns = 0
 
-  const run = (key: string, delay: number) => reservations.reserve(
-    key,
-    async () => {
-      spawns += 1
-      await new Promise(resolve => setTimeout(resolve, delay))
+  const run = (key: string, delay: number) =>
+    reservations.reserve(
+      key,
+      async () => {
+        spawns += 1
+        await new Promise(resolve => setTimeout(resolve, delay))
 
-      return { key }
-    },
-    entry => { pool.set(key, entry) }
-  ).settled
+        return { key }
+      },
+      entry => {
+        pool.set(key, entry)
+      }
+    ).settled
 
   const results = await Promise.all([run('a', 30), run('b', 1), run('c', 15)])
 
