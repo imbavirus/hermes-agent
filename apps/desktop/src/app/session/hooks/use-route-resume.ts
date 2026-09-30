@@ -131,11 +131,6 @@ export function useRouteResume({
     wasGatewayOpenRef.current = gatewayOpen
 
     if (currentView !== 'chat' || !gatewayOpen) {
-      console.error(
-        '[route-resume:probe] gated-out',
-        JSON.stringify({ currentView, gatewayState, gatewayOpen, pathnameChanged, routed: routedSessionId })
-      )
-
       return
     }
 
@@ -170,10 +165,6 @@ export function useRouteResume({
       const ownerProfile = normalizeProfileKey(ownerHint?.targetProfile || ownerHint?.profile || '')
 
       if (ownerProfile && ownerProfile !== normalizeProfileKey($activeGatewayProfile.get())) {
-        console.error(
-          '[route-resume:probe] adopt-owner',
-          JSON.stringify({ routed: routedSessionId, ownerProfile, before: $activeGatewayProfile.get() })
-        )
         $activeGatewayProfile.set(ownerProfile)
         adoptedOwnerRef.current = `${routedSessionId}::${ownerProfile}`
       }
@@ -261,20 +252,6 @@ export function useRouteResume({
 
         const ownerRoute =
           sessionResumeRequest?.sessionId === routedSessionId ? sessionResumeRequest.ownerRoute : undefined
-
-        console.error(
-          '[route-resume:probe] dispatch',
-          JSON.stringify({
-            routed: routedSessionId,
-            alreadyActive,
-            pathnameChanged,
-            gatewayBecameOpen,
-            stuckOnRoutedSession,
-            strandedOnRoutedSession,
-            explicitlyRequested,
-            ownerRoute: ownerRoute ?? null
-          })
-        )
 
         if (ownerRoute) {
           void resumeSession(routedSessionId, true, ownerRoute)
