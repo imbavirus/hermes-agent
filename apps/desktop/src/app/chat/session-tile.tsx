@@ -48,6 +48,7 @@ import {
   sessionMatchesStoredId,
   sessionPinId
 } from '@/store/session'
+import { isSessionRemovalPending } from '@/store/session-removal'
 import { requestForSessionProfile } from '@/store/session-request-router'
 import {
   $focusedStoredSessionId,
@@ -90,11 +91,16 @@ export function shouldAutoResumeSessionTile(args: {
   focusedStoredSessionId: null | string
   gatewayOpen: boolean
   hasLiveWork?: boolean
+  removalPending?: boolean
   resuming: boolean
   runtimeId?: string
   storedSessionId: string
   workspaceMode?: SessionTile['workspaceMode']
 }): boolean {
+  if (args.removalPending) {
+    return false
+  }
+
   if (!args.gatewayOpen || args.runtimeId || args.error || args.resuming) {
     return false
   }
@@ -409,6 +415,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
         focusedStoredSessionId,
         gatewayOpen,
         hasLiveWork,
+        removalPending: isSessionRemovalPending(storedSessionId),
         resuming: resumingRef.current,
         runtimeId: runtimeId ?? undefined,
         storedSessionId,

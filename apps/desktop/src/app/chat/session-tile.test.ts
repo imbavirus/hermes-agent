@@ -3,33 +3,63 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { $gatewayState, $sessions, setSessions } from '@/store/session'
 import { $sessionTiles } from '@/store/session-states'
 
-import { sessionTileResumeFailure, shouldResumeSessionTile, startUnrestoredTileTitleBackfill } from './session-tile'
+import { sessionTileResumeFailure, shouldAutoResumeSessionTile, startUnrestoredTileTitleBackfill } from './session-tile'
 
-describe('shouldResumeSessionTile', () => {
+describe('shouldAutoResumeSessionTile', () => {
   const live = {
+    error: undefined as string | undefined,
+    focusedStoredSessionId: 'stored-live',
     gatewayOpen: true,
     removalPending: false,
     resuming: false,
-    runtimeId: null,
-    tileError: undefined
+    runtimeId: undefined as string | undefined,
+    storedSessionId: 'stored-live',
+    workspaceMode: undefined as 'bots' | 'sessions' | undefined
   }
 
   it('resumes an unbound tile once the gateway is open', () => {
-    expect(shouldResumeSessionTile(live)).toBe(true)
+    expect(shouldAutoResumeSessionTile(live)).toBe(true)
   })
 
   it('does not resume a session the user is deleting', () => {
     // A 4001 racing the delete unbinds the tile runtime, re-arming the resume
     // effect against an id that is already gone: the resume 404s and latches an
-    // error card for a chat that is on its way out.
-    expect(shouldResumeSessionTile({ ...live, removalPending: true })).toBe(false)
+    // error card for a chat that is on its way out. The tile's resumeTile goes
+    // straight to session.resume, so it never passes the producer-level
+    // isSessionRemovalPending filter that guards the primary route — this gate
+    // is the only thing standing between a tombstoned id and a 404.
+    expect(shouldAutoResumeSessionTile({ ...live, removalPending: true })).toBe(false)
   })
 
   it('waits for the gateway, a free slot, and an unbound, unlatched tile', () => {
-    expect(shouldResumeSessionTile({ ...live, gatewayOpen: false })).toBe(false)
-    expect(shouldResumeSessionTile({ ...live, runtimeId: 'rt-1' })).toBe(false)
-    expect(shouldResumeSessionTile({ ...live, tileError: 'boom' })).toBe(false)
-    expect(shouldResumeSessionTile({ ...live, resuming: true })).toBe(false)
+    expect(shouldAutoResumeSessionTile({ ...live, gatewayOpen: false })).toBe(false)
+    expect(shouldAutoResumeSessionTile({ ...live, runtimeId: 'rt-1' })).toBe(false)
+    expect(shouldAutoResumeSessionTile({ ...live, error: 'boom' })).toBe(false)
+    expect(shouldAutoResumeSessionTile({ ...live, resuming: true })).toBe(false)
+  })
+
+  it('does not resume a bot tile or a tile with live work that is being deleted', () => {
+    // The removal guard must win over the bots/live-work exemptions, otherwise
+    // an unfocused bot tile on its way out still resumes.
+    expect(
+      shouldAutoResumeSessionTile({
+        ...live,
+        focusedStoredSessionId: 'primary',
+        removalPending: true,
+        storedSessionId: 'bot-canonical',
+        workspaceMode: 'bots'
+      })
+    ).toBe(false)
+    expect(
+      shouldAutoResumeSessionTile({
+        ...live,
+        focusedStoredSessionId: 'primary',
+        hasLiveWork: true,
+        removalPending: true,
+        storedSessionId: 'background-tile',
+        workspaceMode: 'sessions'
+      })
+    ).toBe(false)
   })
 })
 
