@@ -775,28 +775,77 @@ def _windows_cold_start_plan() -> dict | None:
     return None
 
 
+def _is_service_access_denied(exc: BaseException) -> bool:
+    """True when *exc* is SCM refusing the stop for lack of privilege, not a real stop failure.
+
+    ``sc.exe`` reports this as ``OpenService FAILED 5`` / "Access is denied" when the updater runs
+    unelevated but the gateway service was installed elevated (the common desktop case). A
+    non-admin ``hermes update`` must degrade to plain-process mode instead of aborting the whole
+    fleet, so this one case is told apart from "the service refused to stop" — which still fails
+    closed, because a service that is running does lock the venv we are about to mutate."""
+    if isinstance(exc, PermissionError):
+        return True
+    text = f"{exc}".lower()
+    return (
+        "failed 5" in text
+        or "access is denied" in text
+        or "privilege not held" in text
+    )
+
+
 def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dict, unmapped: list) -> dict:
     """Stop each SCM gateway service, recording them on *token*; roll everything back on failure.
 
     Runs after every fallible ordinary-gateway step so a failure here restores the attempted
-    services AND the already-paused ordinary gateways before re-raising."""
+    services AND the already-paused ordinary gateways before re-raising.
+
+    A service we lack the privilege to stop is SKIPPED, not fatal: an unelevated update still has to
+    finish. The skipped service keeps running (it locks the venv, but it is Hermes' own venv and the
+    service is not ours to stop), so record it for the operator and leave it out of the resume set —
+    ``_resume_windows_services`` only restarts what we recorded as paused, and a service we never
+    stopped must not be "restarted" onto a stale code image."""
     from hermes_cli.update_cmd import _restore_windows_gateway_service, _stop_windows_gateway_service
     paused_services = []
+    skipped_services = []
     current_service_name = None
     try:
         for service in service_gateways:
             current_service_name = str(service.name)
-            _stop_windows_gateway_service(
-                current_service_name, expected_processes=tuple(getattr(service, "descendant_identities", ())),
-                expected_service_identity=(int(service.service_pid), float(service.service_create_time)),
-                expected_gateway_identity=(int(service.gateway_pid), float(service.gateway_create_time)),
-            )
+            try:
+                _stop_windows_gateway_service(
+                    current_service_name, expected_processes=tuple(getattr(service, "descendant_identities", ())),
+                    expected_service_identity=(int(service.service_pid), float(service.service_create_time)),
+                    expected_gateway_identity=(int(service.gateway_pid), float(service.gateway_create_time)),
+                )
+            except Exception as exc:
+                if not _is_service_access_denied(exc):
+                    raise
+                logger.warning(
+                    "Skipping Windows gateway service %s: not privileged to stop it (%s)", current_service_name, exc
+                )
+                skipped_services.append(current_service_name)
+                current_service_name = None
+                continue
             paused_services.append(current_service_name)
             current_service_name = None
         if paused_services:
             token.update(services=paused_services, expected_services=list(paused_services), restarted_services=[])
             token["service_profiles"] = {str(s.name): str(s.profile) for s in service_gateways if str(s.name) in paused_services}
             print("  ✓ Paused Windows gateway service(s): " + ", ".join(paused_services))
+        if skipped_services:
+            # Surfaced, not swallowed: the operator needs to know a live service was left holding
+            # the venv and will still be running the pre-update code until it is restarted elevated.
+            token["skipped_services"] = list(skipped_services)
+            print(
+                "  ⚠ Access is denied: could not stop Windows gateway service(s) without "
+                "administrator rights: " + ", ".join(skipped_services)
+            )
+            print("    Update continues in plain-process mode; these services stay up on the")
+            print("    pre-update code. To finish cleanly, re-run from an elevated shell, or")
+            print("    stop them by hand first:")
+            for name in skipped_services:
+                print(f"      sc stop {name}")
+            print("    Note: service-mode gateways do not auto-start the new build until restarted.")
         return token
     except Exception as exc:
         restore_names = ([current_service_name] if current_service_name else []) + list(reversed(paused_services))
